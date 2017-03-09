@@ -4,7 +4,7 @@
 
 For LLVM see: compiler/llvm/LICENSE.txt
 
-For our code: GPLv2
+For our code: GPLv3
 
 # Building the Compiler
 
@@ -13,7 +13,7 @@ For our code: GPLv2
 Clone this repo into `$HOME/research`
 
 There are a lot of build scripts to glue everything together and make the
-build reproducible.  Tthe scripts all assume you cloned in the above directory.
+build reproducible.  The scripts all assume you cloned in the above directory.
 
     cd ~
     mkdir research
@@ -28,7 +28,7 @@ documentation if you have trouble.
 You may use my build scripts or change the options if you know what you're
 doing.
 
-    cd compiler
+    cd ~/research/datshield/compiler
     mkdir build
     cd build
     ../lto_cmake.sh
@@ -54,9 +54,9 @@ The scripts create a different install directory for each configuration, so you
 don't have to rebuild every time you want to test a different configuration.
 They are:
 
-    $HOME/research/dy_sysroot_debug
-    $HOME/research/dy_sysroot_baseline
-    $HOME/research/dy_sysroot_release
+    $HOME/research/datashield-public/ds_sysroot_debug
+    $HOME/research/datashield-public/ds_sysroot_baseline
+    $HOME/research/datashield-public/ds_sysroot_release
 
 ## 4. Build libcxx
 
@@ -94,10 +94,10 @@ You should use the scripts, but if you need/want to change something an know
 what you're doing you can give options manually.  These are the options that the scripts setup:
 
 * `-datashield-lto` enables the datashield pass (required)
+* `-T../../linker/linker_script.lds` this passes our script to the linker (required)
 * `-datashield-debug-mode` prints debug logs at runtime
 * `-datashield-save-module-after` saves the compiled module to a file after datashield's transformation
 * `-datashield-save-module-before` saves the compiled module to a file before datashield's transformation
-* `-T../../linker/linker_script.lds` this passes our script to the linker (required)
 * `-debug-only=datashield` prints debug logs at compile time
 
 The following are mutually exclusive:
@@ -108,8 +108,9 @@ The following are mutually exclusive:
 * `-datashield-use-prefix` give this option if you want prefix or MPX
 * `-datashield-use-late-mpx` give this option if you want prefix or MPX
 
-
-
-
-
+Must be used with `-datashield-use-mask`
+* `-datashield-intergity-only-mode` only protect stores
+* `-datashield-confidentiality-only-mode` only protect loads
     
+* `-datashield-library-mode` for compiling libraries with sandboxing only
+* `-datashield-separation-mode` basic arithmetic does not propagate sensitivity
