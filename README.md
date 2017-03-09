@@ -28,7 +28,7 @@ documentation if you have trouble.
 You may use my build scripts or change the options if you know what you're
 doing.
 
-    cd ~/research/datshield/compiler
+    cd ~/research/datashield/compiler
     mkdir build
     cd build
     ../lto_cmake.sh
@@ -54,9 +54,9 @@ The scripts create a different install directory for each configuration, so you
 don't have to rebuild every time you want to test a different configuration.
 They are:
 
-    $HOME/research/datashield-public/ds_sysroot_debug
-    $HOME/research/datashield-public/ds_sysroot_baseline
-    $HOME/research/datashield-public/ds_sysroot_release
+    $HOME/research/datashield/ds_sysroot_debug
+    $HOME/research/datashield/ds_sysroot_baseline
+    $HOME/research/datashield/ds_sysroot_release
 
 ## 4. Build libcxx
 
