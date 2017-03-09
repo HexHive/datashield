@@ -28,20 +28,42 @@ documentation if you have trouble.
 You may use my build scripts or change the options if you know what you're
 doing.
 
-    cd ~/research/datashield/compiler
-    mkdir build
-    cd build
-    ../lto_cmake.sh
-    ninja
-    ninja install
-
-## 3. Build libc
-
-You can build libc in 3 different configurations:
+DataShield has 3 different configurations:
 
 1. debug - debug info, unoptimized, with instrumentation
 2. baseline - optimized, no instrumentation
 3. release - optimized, with instrumentation
+
+If you just want to experiment with DataShield debug might be the best:
+
+    cd ~/research/datashield/compiler
+    mkdir build-debug
+    cd build
+    ../lto_cmake_debug.sh
+    ninja
+    ninja install
+
+You can build release if you care about compile times:
+
+    cd ~/research/datashield/compiler
+    mkdir build-release
+    cd build
+    ../lto_cmake_release.sh
+    ninja
+    ninja install
+
+Baseline is the same as release for the compiler since the compiler itself is
+not instrumented, but you need to build it if you want a baseline comparison for benchmarking:
+
+    cd ~/research/datashield/compiler
+    mkdir build-baseline
+    cd build
+    ../lto_cmake_baseline.sh
+    ninja
+    ninja install
+
+## 4. Build libc
+
 
 To build a configuration, just run `build-$configuration`
 
