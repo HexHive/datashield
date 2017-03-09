@@ -72,6 +72,16 @@ UsePrefix("datashield-use-prefix-check",
     cl::init(false));
 
 static cl::opt<bool>
+UseMbedtlsAnnotations("datashield-use-mbedtls-annotations",
+    cl::desc("use extra annotations for mbedtls fn ptrs"),
+    cl::init(false));
+
+static cl::opt<bool>
+UseAstarAnnotations("datashield-use-astar-annotations",
+    cl::desc("use extra annotations for astar fn ptrs"),
+    cl::init(false));
+
+static cl::opt<bool>
 SaveModuleAfter("datashield-save-module-after",
     cl::desc("save the module to disk after transformation"),
     cl::init(false));
@@ -1829,6 +1839,160 @@ class SensitivityAnalysis {
   void analyzeModule() {
     sensitiveTypes.dump();
     //sensitiveSet.dump();
+   
+    if (UseMbedtlsAnnotations) {
+      makeFirstArgSensitive("ecp_mod_p384");
+      makeFirstArgSensitive("rsa_free_wrap");
+      makeFirstArgSensitive("mbedtls_mpi_grow");
+      makeFirstArgSensitive("mbedtls_net_send");
+      makeFirstArgSensitive("mbedtls_net_recv");
+      makeFirstArgSensitive("mbedtls_rsa_free");
+      makeFirstTwoArgSensitive("mbedtls_ctr_drbg_random");
+    }
+
+    if (UseMbedtlsAnnotations) {
+      vector<int> mbedtls_entropy_func_sens {0, 1, 1, 0};
+      cloneFunctionWithSensitivity(M, "mbedtls_entropy_func", mbedtls_entropy_func_sens);
+
+      vector<int> mbedtls_platform_entropy_poll_sens {0, 1, 1, 0, 1};
+      cloneFunctionWithSensitivity(M, "mbedtls_platform_entropy_poll", mbedtls_platform_entropy_poll_sens);
+
+      vector<int> mbedtls_hardclock_poll_sens {0, 1, 1, 0, 1};
+      cloneFunctionWithSensitivity(M, "mbedtls_hardclock_poll", mbedtls_hardclock_poll_sens);
+
+      vector<int> aes_crypt_ecb_wrap_sens {0, 1, 0, 1, 1};
+      cloneFunctionWithSensitivity(M, "aes_crypt_ecb_wrap", aes_crypt_ecb_wrap_sens);
+
+      vector<int> aes_setkey_enc_wrap_sens {0, 1, 1, 0};
+      cloneFunctionWithSensitivity(M, "aes_setkey_enc_wrap", aes_setkey_enc_wrap_sens);
+
+      vector<int> ssl_calc_finished_tls_sha384_sens {0, 1, 1, 0};
+      cloneFunctionWithSensitivity(M, "ssl_calc_finished_tls_sha384", ssl_calc_finished_tls_sha384_sens);
+
+      vector<int> rsa_sign_wrap_sens {0, 1, 0, 1, 0, 1, 1, 1, 1};
+      cloneFunctionWithSensitivity(M, "rsa_sign_wrap", rsa_sign_wrap_sens);
+
+      vector<int> eckey_sign_wrap_sens {0, 1, 0, 1, 0, 1, 1, 1, 1};
+      cloneFunctionWithSensitivity(M, "eckey_sign_wrap", eckey_sign_wrap_sens);
+
+      vector<int> ecp_mod_p256_sens {1, 1};
+      cloneFunctionWithSensitivity(M, "ecp_mod_p256", ecp_mod_p256_sens);
+
+      vector<int> mbedtls_net_recv_timeout_sens {0, 1, 1, 0};
+      cloneFunctionWithSensitivity(M, "mbedtls_net_recv_timeout", mbedtls_net_recv_timeout_sens);
+
+      vector<int> mbedtls_hmac_drbg_random_sens {0, 1, 1, 0};
+      cloneFunctionWithSensitivity(M, "mbedtls_hmac_drbg_random", mbedtls_hmac_drbg_random_sens);
+
+      vector<int> mbedtls_timing_set_delay_sens {0, 1, 0, 0};
+      cloneFunctionWithSensitivity(M, "mbedtls_timing_set_delay", mbedtls_timing_set_delay_sens);
+
+      vector<int> sha384_finish_wrap_sens {0, 1, 1};
+      cloneFunctionWithSensitivity(M, "sha384_finish_wrap", sha384_finish_wrap_sens);
+
+      vector<int> sha224_finish_wrap_sens {0, 1, 1};
+      cloneFunctionWithSensitivity(M, "sha224_finish_wrap", sha224_finish_wrap_sens);
+
+      vector<int> sha256_wrap_sens {0, 1, 0, 1};
+      cloneFunctionWithSensitivity(M, "sha256_wrap", sha256_wrap_sens);
+
+      vector<int> eckey_verify_wrap_sens {0, 1, 0, 1, 0, 1, 0};
+      cloneFunctionWithSensitivity(M, "eckey_verify_wrap", eckey_verify_wrap_sens);
+
+      cloneAllocFunction(M, "rsa_alloc_wrap");
+      cloneAllocFunction(M, "aes_ctx_alloc");
+      cloneAllocFunction(M, "ecdsa_alloc_wrap");
+      cloneAllocFunction(M, "eckey_alloc_wrap");
+      cloneAllocFunction(M, "sha384_ctx_alloc");
+      cloneAllocFunction(M, "sha224_ctx_alloc");
+      cloneAllocFunction(M, "gcm_ctx_alloc");
+
+      cloneFreeFunction(M, "gcm_ctx_free");
+      cloneFreeFunction(M, "aes_ctx_free");
+      cloneFreeFunction(M, "rsa_free_wrap");
+      cloneFreeFunction(M, "eckey_free_wrap");
+      cloneFreeFunction(M, "sha384_ctx_free");
+      cloneFreeFunction(M, "sha224_ctx_free");
+
+      vector<int> sha512_starts_wrap_sens {0, 1};
+      cloneFunctionWithSensitivity(M, "sha512_starts_wrap", sha512_starts_wrap_sens);
+
+      vector<int> sha256_starts_wrap_sens {0, 1};
+      cloneFunctionWithSensitivity(M, "sha256_starts_wrap", sha256_starts_wrap_sens);
+
+      vector<int> rsa_verify_wrap_sens {0, 1, 0, 1, 0, 1, 0};
+      cloneFunctionWithSensitivity(M, "rsa_verify_wrap", rsa_verify_wrap_sens);
+
+      vector<int> ecp_mod_p384_sens {1, 1};
+      cloneFunctionWithSensitivity(M, "ecp_mod_p384", ecp_mod_p384_sens);
+
+      vector<int> mbedtls_ctr_drbg_random_sens {1,1,1,0};
+      cloneFunctionWithSensitivity(M, "mbedtls_ctr_drbg_random", mbedtls_ctr_drbg_random_sens);
+
+      vector<int> ssl_update_checksum_start_sens {0,1,1,0};
+      cloneFunctionWithSensitivity(M, "ssl_update_checksum_start", ssl_update_checksum_start_sens);
+
+      vector<int> ssl_update_checksum_sha384_sens {0,1,1,0};
+      cloneFunctionWithSensitivity(M, "ssl_update_checksum_sha384", ssl_update_checksum_sha384_sens);
+
+      vector<int> mbedtls_sha1_sens {0,1,0,1};
+      cloneFunctionWithSensitivity(M, "mbedtls_sha1", mbedtls_sha1_sens);
+
+      vector<int> rsa_get_bitlen_sens {1, 1};
+      cloneFunctionWithSensitivity(M, "rsa_get_bitlen", rsa_get_bitlen_sens);
+
+      vector<int> eckey_get_bitlen_sens {1, 1};
+      cloneFunctionWithSensitivity(M, "eckey_get_bitlen", eckey_get_bitlen_sens);
+
+      vector<int> sha384_update_wrap_sens {0,1,1,0};
+      cloneFunctionWithSensitivity(M, "sha384_update_wrap", sha384_update_wrap_sens);
+
+      vector<int> ecp_mod_p521_sens {0,1};
+      cloneFunctionWithSensitivity(M, "ecp_mod_p521", ecp_mod_p521_sens);
+
+      vector<int> ssl_calc_verify_tls_sha384_sens {0,1,1};
+      cloneFunctionWithSensitivity(M, "ssl_calc_verify_tls_sha384", ssl_calc_verify_tls_sha384_sens);
+
+      vector<int> tls_prf_sha384_sens {0, 1, 0, 1, 1, 0, 1, 0};
+      cloneFunctionWithSensitivity(M, "tls_prf_sha384", tls_prf_sha384_sens);
+
+      vector<int> gcm_aes_setkey_wrap_sens {0, 1, 1, 0};
+      cloneFunctionWithSensitivity(M, "gcm_aes_setkey_wrap", gcm_aes_setkey_wrap_sens);
+
+      vector<int> mbedtls_ssl_ticket_write_sens {0, 1, 1, 1, 1, 1, 1};
+      cloneFunctionWithSensitivity(M, "mbedtls_ssl_ticket_write", mbedtls_ssl_ticket_write_sens);
+
+      vector<int> mbedtls_timing_get_delay_sens {0, 1};
+      cloneFunctionWithSensitivity(M, "mbedtls_timing_get_delay", mbedtls_timing_get_delay_sens);
+
+      // this is a global string that should be sensitive
+      // it's directly passed to a function ptr so our
+      // analysis fails to discover that its used sensitively in the callee
+      // this is for tls_prf_sha384
+      auto str8567 = M.getNamedGlobal(".str.8.567");
+      auto str12571 = M.getNamedGlobal(".str.12.571");
+      auto str875 = M.getNamedGlobal(".str.8.75");
+      auto str888 = M.getNamedGlobal(".str.8.88");
+      auto str1279 = M.getNamedGlobal(".str.12.79");
+      auto str1292 = M.getNamedGlobal(".str.12.92");
+      if (str8567) { sensitiveSet.insert(str8567); }
+      if (str12571) { sensitiveSet.insert(str12571); }
+      if (str888) { sensitiveSet.insert(str888); }
+      if (str875) { sensitiveSet.insert(str875); }
+      if (str1279) { sensitiveSet.insert(str1279); }
+      if (str1292) { sensitiveSet.insert(str1292); }
+
+      // these were only for the old version of mbedtls
+      auto str9 = M.getNamedGlobal(".str.9");
+      if (str9) { sensitiveSet.insert(str9); }
+      auto str5 = M.getNamedGlobal(".str.5");
+      if (str5) { sensitiveSet.insert(str5); }
+    }
+
+    if (UseAstarAnnotations) {
+      vector<int> _ZN9regwayobj12isaddtoboundEP6regobjS1_sens {0, 0, 0, 1};
+      cloneFunctionWithSensitivity(M, "_ZN9regwayobj12isaddtoboundEP6regobjS1_", _ZN9regwayobj12isaddtoboundEP6regobjS1_sens);
+    }
 
     for (auto& F : M) {
       sensitiveSet.findSensitiveTypedValues(F);
@@ -3308,6 +3472,164 @@ struct DataShield : public ModulePass {
     dbgs() << "end llvm.memcpy metadata copying\n";
 
     boxer.copyAndReplaceArgvIfNecessary(M, SA.sensitiveSet);
+
+    if (UseMbedtlsAnnotations) {
+      auto entropyFn = M.getFunction("mbedtls_entropy_func");
+      if (entropyFn) {
+        auto repl = M.getFunction("mbedtls_entropy_func_0_110");
+        if (repl) {
+          entropyFn->replaceAllUsesWith(repl);
+        }
+      }
+
+      auto rsa_free_wrap = M.getFunction("rsa_free_wrap");
+      auto rsa_free_wrap_0_1 = M.getFunction("rsa_free_wrap_0_1");
+      if (rsa_free_wrap && rsa_free_wrap_0_1) {
+        rsa_free_wrap->replaceAllUsesWith(rsa_free_wrap_0_1);
+      }
+
+      auto rsa_alloc_wrap = M.getFunction("rsa_alloc_wrap");
+      auto rsa_alloc_wrap_1_ = M.getFunction("rsa_alloc_wrap_1_");
+      if (rsa_alloc_wrap && rsa_alloc_wrap_1_) {
+        rsa_alloc_wrap->replaceAllUsesWith(rsa_alloc_wrap_1_);
+      }
+
+      auto rsa_verify_wrap = M.getFunction("rsa_verify_wrap");
+      auto rsa_verify_wrap_0_101010 = M.getFunction("rsa_verify_wrap_0_101010");
+      if (rsa_verify_wrap && rsa_verify_wrap_0_101010) {
+        rsa_verify_wrap->replaceAllUsesWith(rsa_verify_wrap_0_101010);
+      }
+
+      auto eckey_alloc_wrap = M.getFunction("eckey_alloc_wrap");
+      auto eckey_alloc_wrap_1_ = M.getFunction("eckey_alloc_wrap_1_");
+      if (eckey_alloc_wrap && eckey_alloc_wrap_1_) {
+        eckey_alloc_wrap->replaceAllUsesWith(eckey_alloc_wrap_1_);
+      }
+
+      auto eckey_free_wrap = M.getFunction("eckey_free_wrap");
+      auto eckey_free_wrap_0_1 = M.getFunction("eckey_free_wrap_0_1");
+      if (eckey_free_wrap && eckey_free_wrap_0_1) {
+        eckey_free_wrap->replaceAllUsesWith(eckey_free_wrap_0_1);
+      }
+
+      auto ecdsa_alloc_wrap = M.getFunction("ecdsa_alloc_wrap");
+      auto ecdsa_alloc_wrap_1_ = M.getFunction("ecdsa_alloc_wrap_1_");
+      if (ecdsa_alloc_wrap && ecdsa_alloc_wrap_1_) {
+        ecdsa_alloc_wrap->replaceAllUsesWith(ecdsa_alloc_wrap_1_);
+      }
+
+      auto ecp_mod_p384 = M.getFunction("ecp_mod_p384");
+      auto ecp_mod_p384_1_1 = M.getFunction("ecp_mod_p384_1_1");
+      if (ecp_mod_p384 && ecp_mod_p384_1_1) {
+        ecp_mod_p384->replaceAllUsesWith(ecp_mod_p384_1_1);
+      }
+
+      auto mbedtls_ctr_drbg_random = M.getFunction("mbedtls_ctr_drbg_random");
+      auto mbedtls_ctr_drbg_random_1_110 = M.getFunction("mbedtls_ctr_drbg_random_1_110");
+      if (mbedtls_ctr_drbg_random && mbedtls_ctr_drbg_random_1_110) {
+        mbedtls_ctr_drbg_random->replaceAllUsesWith(mbedtls_ctr_drbg_random_1_110);
+      }
+
+      auto ssl_update_checksum_start = M.getFunction("ssl_update_checksum_start");
+      auto ssl_update_checksum_start_0_110 = M.getFunction("ssl_update_checksum_start_0_110");
+      if (ssl_update_checksum_start && ssl_update_checksum_start_0_110) {
+        ssl_update_checksum_start->replaceAllUsesWith(ssl_update_checksum_start_0_110);
+      }
+
+      auto ssl_update_checksum_sha384 = M.getFunction("ssl_update_checksum_sha384");
+      auto ssl_update_checksum_sha384_0_110 = M.getFunction("ssl_update_checksum_sha384_0_110");
+      if (ssl_update_checksum_sha384 && ssl_update_checksum_sha384_0_110){
+        ssl_update_checksum_sha384->replaceAllUsesWith(ssl_update_checksum_sha384_0_110);
+      }
+
+      auto rsa_get_bitlen = M.getFunction("rsa_get_bitlen");
+      auto rsa_get_bitlen_1_1 = M.getFunction("rsa_get_bitlen_1_1");
+      if (rsa_get_bitlen && rsa_get_bitlen_1_1) {
+        rsa_get_bitlen->replaceAllUsesWith(rsa_get_bitlen_1_1);
+      }
+
+      auto mbedtls_sha1 = M.getFunction("mbedtls_sha1");
+      auto mbedtls_sha1_0_101 = M.getFunction("mbedtls_sha1_0_101");
+      if (mbedtls_sha1 && mbedtls_sha1_0_101) {
+        mbedtls_sha1->replaceAllUsesWith(mbedtls_sha1_0_101);
+      }
+
+      auto sha384_ctx_alloc = M.getFunction("sha384_ctx_alloc");
+      auto sha384_ctx_alloc_1_ = M.getFunction("sha384_ctx_alloc_1_");
+      if (sha384_ctx_alloc_1_ && sha384_ctx_alloc) {
+        sha384_ctx_alloc->replaceAllUsesWith(sha384_ctx_alloc_1_);
+      }
+
+      auto sha384_update_wrap = M.getFunction("sha384_update_wrap");
+      auto sha384_update_wrap_0_110 = M.getFunction("sha384_update_wrap_0_110");
+      if (sha384_update_wrap_0_110 && sha384_update_wrap) {
+        sha384_update_wrap->replaceAllUsesWith(sha384_update_wrap_0_110);
+      }
+
+      auto sha384_ctx_free = M.getFunction("sha384_ctx_free");
+      auto sha384_ctx_free_0_1 = M.getFunction("sha384_ctx_free_0_1");
+      if (sha384_ctx_free_0_1 && sha384_ctx_free) {
+        sha384_ctx_free->replaceAllUsesWith(sha384_ctx_free_0_1);
+      }
+
+      auto ecp_mod_p521 = M.getFunction("ecp_mod_p521");
+      auto ecp_mod_p521_0_1 = M.getFunction("ecp_mod_p521_0_1");
+      if (ecp_mod_p521 && ecp_mod_p521_0_1) {
+        ecp_mod_p521->replaceAllUsesWith(ecp_mod_p521_0_1);
+      }
+
+      auto ssl_calc_verify_tls_sha384 = M.getFunction("ssl_calc_verify_tls_sha384");
+      auto ssl_calc_verify_tls_sha384_0_11 = M.getFunction("ssl_calc_verify_tls_sha384_0_11");
+      if (ssl_calc_verify_tls_sha384_0_11 && ssl_calc_verify_tls_sha384) {
+        ssl_calc_verify_tls_sha384->replaceAllUsesWith(ssl_calc_verify_tls_sha384_0_11);
+      }
+
+      auto tls_prf_sha384_0_1011010 = M.getFunction("tls_prf_sha384_0_1011010");
+      auto tls_prf_sha384 = M.getFunction("tls_prf_sha384");
+      if (tls_prf_sha384 && tls_prf_sha384_0_1011010) {
+        tls_prf_sha384->replaceAllUsesWith(tls_prf_sha384_0_1011010);
+      }
+
+      auto sha512_starts_wrap = M.getFunction("sha512_starts_wrap");
+      auto sha512_starts_wrap_0_1 = M.getFunction("sha512_starts_wrap_0_1");
+      if (sha512_starts_wrap && sha512_starts_wrap_0_1) {
+        sha512_starts_wrap->replaceAllUsesWith(sha512_starts_wrap_0_1);
+      }
+
+      replaceAllFunctionUsesWith(M, "gcm_ctx_alloc", "gcm_ctx_alloc_1_");
+      replaceAllFunctionUsesWith(M, "gcm_aes_setkey_wrap", "gcm_aes_setkey_wrap_0_110");
+      replaceAllFunctionUsesWith(M, "aes_ctx_alloc", "aes_ctx_alloc_1_");
+      replaceAllFunctionUsesWith(M, "aes_crypt_ecb_wrap", "aes_crypt_ecb_wrap_0_1011");
+      replaceAllFunctionUsesWith(M, "aes_setkey_enc_wrap", "aes_setkey_enc_wrap_0_110");
+      replaceAllFunctionUsesWith(M, "ssl_calc_finished_tls_sha384", "ssl_calc_finished_tls_sha384_0_110");
+      replaceAllFunctionUsesWith(M, "gcm_ctx_free", "gcm_ctx_free_0_1");
+      replaceAllFunctionUsesWith(M, "aes_ctx_free", "aes_ctx_free_0_1");
+      replaceAllFunctionUsesWith(M, "mbedtls_platform_entropy_poll", "mbedtls_platform_entropy_poll_0_1101");
+      replaceAllFunctionUsesWith(M, "mbedtls_hardclock_poll", "mbedtls_hardclock_poll_0_1101");
+      replaceAllFunctionUsesWith(M, "rsa_sign_wrap", "rsa_sign_wrap_0_10101111");
+      replaceAllFunctionUsesWith(M, "eckey_sign_wrap", "eckey_sign_wrap_0_10101111");
+      replaceAllFunctionUsesWith(M, "ecp_mod_p256", "ecp_mod_p256_1_1");
+      replaceAllFunctionUsesWith(M, "mbedtls_net_recv_timeout", "mbedtls_net_recv_timeout_0_110");
+      replaceAllFunctionUsesWith(M, "mbedtls_hmac_drbg_random", "mbedtls_hmac_drbg_random_0_110");
+      replaceAllFunctionUsesWith(M, "mbedtls_ssl_ticket_write", "mbedtls_ssl_ticket_write_0_111111");
+      replaceAllFunctionUsesWith(M, "mbedtls_timing_set_delay", "mbedtls_timing_set_delay_0_100");
+      replaceAllFunctionUsesWith(M, "mbedtls_timing_get_delay", "mbedtls_timing_get_delay_0_1");
+      replaceAllFunctionUsesWith(M, "sha384_finish_wrap", "sha384_finish_wrap_0_11");
+
+      replaceAllFunctionUsesWith(M, "sha224_finish_wrap", "sha224_finish_wrap_0_11");
+      replaceAllFunctionUsesWith(M, "sha256_starts_wrap", "sha256_starts_wrap_0_11");
+      replaceAllFunctionUsesWith(M, "sha256_wrap", "sha256_wrap_0_101");
+      replaceAllFunctionUsesWith(M, "sha224_ctx_free", "sha224_ctx_free_0_1");
+      replaceAllFunctionUsesWith(M, "sha224_ctx_alloc", "sha224_ctx_alloc_1_");
+      replaceAllFunctionUsesWith(M, "eckey_verify_wrap", "eckey_verify_wrap_0_101010");
+      replaceAllFunctionUsesWith(M, "eckey_get_bitlen", "eckey_get_bitlen_1_1");
+
+    }
+
+    if (UseAstarAnnotations) {
+      replaceAllFunctionUsesWith(M, "_ZN9regwayobj12isaddtoboundEP6regobjS1_", "_ZN9regwayobj12isaddtoboundEP6regobjS1__0_001");
+    }
+
 
     if (DebugMode) {
         insertStatsDump(M);

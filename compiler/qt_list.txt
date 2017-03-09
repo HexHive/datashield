@@ -14,3 +14,4 @@ CMAKE_C_FLAGS=-fstandalone-debug
 CMAKE_CXX_FLAGS=-fstandalone-debug  
 BUILD_SHARED_LIBS=ON  
 LLVM_BINUTILS_INCDIR=/usr/include 
+CMAKE_INSTALL_PREFIX=$HOME/research/datashield/ds_sysroot_debug 
