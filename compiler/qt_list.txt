@@ -1,0 +1,16 @@
+This is just build options as a flat list
+for copy-pasting into qt-creator
+
+CMAKE_BUILD_TYPE=Debug 
+CMAKE_C_COMPILER=clang 
+CMAKE_CXX_COMPILER=clang++ 
+LLVM_ENABLE_ASSERTIONS=ON  
+LLVM_BUILD_TESTS=OFF  
+LLVM_BUILD_EXAMPLES=OFF  
+LLVM_INCLUDE_TESTS=OFF 
+LLVM_INCLUDE_EXAMPLES=OFF 
+LLVM_TARGETS_TO_BUILD="X86"  
+CMAKE_C_FLAGS=-fstandalone-debug  
+CMAKE_CXX_FLAGS=-fstandalone-debug  
+BUILD_SHARED_LIBS=ON  
+LLVM_BINUTILS_INCDIR=/usr/include 
