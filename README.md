@@ -142,6 +142,8 @@ The following are mutually exclusive:
 Must be used with `-datashield-use-mask`
 * `-datashield-intergity-only-mode` only protect stores
 * `-datashield-confidentiality-only-mode` only protect loads
-    
-* `-datashield-library-mode` for compiling libraries with sandboxing only
 * `-datashield-separation-mode` basic arithmetic does not propagate sensitivity
+
+Two options for compiling system libraries:
+* `-datashield-library-mode` for compiling libraries with sandboxing only
+* `-datashield-modular` run the pass without LTO
