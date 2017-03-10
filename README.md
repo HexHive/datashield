@@ -110,6 +110,15 @@ that there are multiple options for the variable `CC`.  To chose which set of
 options you want you just change `CC` to one of the scripts in
 `$HOME/research/datashield/bin`.  They all start with `musl-clang-*`.
 
+## Build Hello World in C++
+
+Building C++ (versus C) is basically the same but you need to use the C++ scripts.
+It's a good idea to build "Hello World" in C an C++ as a sanity check.
+
+     cd $HOME/research/tests/hand-written/hello_worldxx
+     make
+     ./test
+
 ## Compiler options
 
 You should use the scripts, but if you need/want to change something and know
