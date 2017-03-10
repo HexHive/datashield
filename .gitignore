@@ -1,1 +1,6 @@
 *.pyc
+compiler/llvm/utils/llvm-build/llvmbuild/__init__.pyc
+compiler/llvm/utils/llvm-build/llvmbuild/componentinfo.pyc
+compiler/llvm/utils/llvm-build/llvmbuild/configutil.pyc
+compiler/llvm/utils/llvm-build/llvmbuild/main.pyc
+compiler/llvm/utils/llvm-build/llvmbuild/util.pyc
