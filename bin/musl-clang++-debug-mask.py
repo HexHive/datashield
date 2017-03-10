@@ -11,10 +11,7 @@ ds_linker_args = ["-Wl",\
 "-plugin-opt=-datashield-debug-mode",\
 "-plugin-opt=-debug-only=datashield",\
 "-T../../linker/linker_script.lds"]
-cmd = get_clang_command("debug", args, ds_linker_args, cxx=False)
+cmd = get_clang_command("debug", args, ds_linker_args, cxx=True)
 print cmd
 check_call(cmd, shell=True)
-
-
-
 

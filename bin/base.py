@@ -2,7 +2,7 @@
 import os, sys
 from subprocess import check_call
 
-def get_clang_command(build_type, cmdLineArgs, ld, cxx, linker_args):
+def get_clang_command(build_type, cmdLineArgs, linker_args, cxx=False):
     DS_HOME=os.path.join(os.getenv("HOME"), "research", "datashield")
     DS_SYSROOT=os.path.join(DS_HOME, "ds_sysroot_{0}".format(build_type))
     DS_LIB_DIR=os.path.join(DS_SYSROOT, "lib")
@@ -16,8 +16,14 @@ def get_clang_command(build_type, cmdLineArgs, ld, cxx, linker_args):
 
     if cxx:
       args = [CXX]
+      ld = "xx.musl."
     else:
       args = [CC]
+      ld = "musl."
+
+    if build_type == "debug":
+      ld += "debug"
+    ld += ".py"
     args.append("-static")
     args.append("-v")
     args.append("-flto")
@@ -36,7 +42,7 @@ def get_clang_command(build_type, cmdLineArgs, ld, cxx, linker_args):
     args.append(os.path.join(DS_SYSROOT, "include"))
     if linking:
         args.append("-fuse-ld={0}".format(ld))
-	args.append(",".join(linker_args))
+    args.append(",".join(linker_args))
     args.extend(cmdLineArgs)
     cmd = " ".join(args)
     return cmd
@@ -64,18 +70,6 @@ def get_ld_command(build_type, cxx=False, cmdLineArgs=None):
     args.append(os.path.join(DS_LIB_DIR, "libc++abi.a"))
     args.append(os.path.join(DS_LIB_DIR, "libunwind.a"))
   args.append(os.path.join(DS_LIB_DIR, "libc.a"))
-  #args.append(os.path.join(DS_LIB_DIR, "libm.a"))
   cmd = " ".join(args)
   return cmd
-
-'''
-def get_index_of_last_plugin_opt(cmdLineArgs):
-  index = -1
-  for i,e in enumerate(cmdLineArgs):
-    if e.startswith("-plugin-opt="):
-       index = i
-    if i == -1:
-	raise "there were no plugin opts?!?!"
-  return i
-'''
 
