@@ -67,10 +67,10 @@ not instrumented, but you need to build it if you want a baseline comparison for
 
 To build a configuration, just run `build-$configuration`
 
-  cd $HOME/research/datashield/libc
-  ./build-debug.py
-  ./build-baseline.py
-  ./build-release.py
+    cd $HOME/research/datashield/libc
+    ./build-debug.py
+    ./build-baseline.py
+    ./build-release.py
 
 The scripts create a different install directory for each configuration, so you
 don't have to rebuild every time you want to test a different configuration.
@@ -84,8 +84,8 @@ They are:
 
 Building libcxx is basically the same as building libc.  It has the same three configurations.  Running `build.py all` builds everything.  Otherwise run `build.py` with no arguments for a help message.
 
-  cd $HOME/research/datashield/libc
-  ./build.py all
+    cd $HOME/research/datashield/libc
+    ./build.py all
 
 # Compiling Instrumented Programs
 
@@ -96,9 +96,9 @@ various protections.  There are scripts in `$HOME/research/bin` that make this m
 
 First, you should build a "Hello World" program to make sure your build is sane.
 
-   cd $HOME/research/tests/hand-written/hello_world
-   make
-   ./test
+     cd $HOME/research/tests/hand-written/hello_world
+     make
+     ./test
 
 It should print out a whole bunch of log information and "hello world" and
 "good bye."  If not, something is seriously wrong and you should create a
@@ -112,7 +112,7 @@ options you want you just change `CC` to one of the scripts in
 
 ## Compiler options
 
-You should use the scripts, but if you need/want to change something an know
+You should use the scripts, but if you need/want to change something and know
 what you're doing you can give options manually.  These are the options that the scripts setup:
 
 * `-datashield-lto` enables the datashield pass (required)
