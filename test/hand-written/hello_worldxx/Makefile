@@ -1,6 +1,5 @@
-#CC=~/research/datashield/bin/musl-clang-debug-mask.py
-#CC=~/research/datashield/bin/musl-clang-debug-late-mpx.py
 CXX=~/research/datashield/bin/musl-clang++-debug-mask.py
+#CXX=~/research/datashield/bin/musl-clang++-release-mask.py
 
 test: test.o test2.o
 	$(CXX) test.o test2.o -o test
