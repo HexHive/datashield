@@ -1,10 +1,10 @@
 DS_HOME=$HOME/research/datashield
 DS_SYSROOT=$HOME/research/datashield/ds_sysroot_release
-cmake -GNinja -DLLVM_PATH=$DS_HOME/compiler/llvm-3.9 \
+cmake -GNinja -DLLVM_PATH=$DS_HOME/compiler/llvm \
 -DCMAKE_SYSROOT=$DS_SYSROOT \
 -DCMAKE_BUILD_TYPE=Release \
--DCMAKE_CXX_COMPILER=$DS_HOME/compiler/build/bin/clang++ \
--DCMAKE_C_COMPILER=$DS_HOME/compiler/build/bin/clang \
+-DCMAKE_CXX_COMPILER=$DS_SYSROOT/bin/clang++ \
+-DCMAKE_C_COMPILER=$DS_SYSROOT/bin/clang \
 -DCMAKE_CXX_FLAGS="-v -O3 -nostdlib -mllvm -datashield-modular -mllvm -datashield-library-mode $DS_SYSROOT/lib/libc.a" \
 -DCMAKE_C_FLAGS="-v -O3 -nostdlib -mllvm -datashield-modular -mllvm -datashield-library-mode $DS_SYSROOT/lib/libc.a"  \
 -DCMAKE_INSTALL_PREFIX=$DS_SYSROOT \
