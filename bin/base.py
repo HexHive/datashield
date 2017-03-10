@@ -21,8 +21,7 @@ def get_clang_command(build_type, cmdLineArgs, linker_args, cxx=False):
       args = [CC]
       ld = "musl."
 
-    if build_type == "debug":
-      ld += "debug"
+    ld += build_type
     ld += ".py"
     args.append("-static")
     args.append("-v")
