@@ -30,7 +30,7 @@ def build_libunwind():
     check_call("ninja install", shell=True)
 
 def print_usage():
-    print "USAGE: build.py [debug|release|baseline] <unwind|abi|cxx>"
+    print "USAGE: build.py <debug|release|baseline> [unwind|abi|cxx]"
 
 start_dir = os.getcwd()
 

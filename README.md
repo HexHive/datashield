@@ -38,18 +38,16 @@ If you just want to experiment with DataShield debug might be the best:
 
     cd ~/research/datashield/compiler
     mkdir build-debug
-    cd build
+    cd build-debug
     ../lto_cmake_debug.sh
-    ninja
     ninja install
 
 You can build release if you care about compile times:
 
     cd ~/research/datashield/compiler
     mkdir build-release
-    cd build
+    cd build-release
     ../lto_cmake_release.sh
-    ninja
     ninja install
 
 Baseline is the same as release for the compiler since the compiler itself is
@@ -57,9 +55,8 @@ not instrumented, but you need to build it if you want a baseline comparison for
 
     cd ~/research/datashield/compiler
     mkdir build-baseline
-    cd build
+    cd build-baseline
     ../lto_cmake_baseline.sh
-    ninja
     ninja install
 
 ## 4. Build libc
@@ -82,10 +79,10 @@ They are:
 
 ## 4. Build libcxx
 
-Building libcxx is basically the same as building libc.  It has the same three configurations.  Running `build.py all` builds everything.  Otherwise run `build.py` with no arguments for a help message.
+Building libcxx is basically the same as building libc.  It has the same three configurations.  Running `build.py <config>` builds everything.  Otherwise run `build.py` with no arguments for a help message.
 
-    cd $HOME/research/datashield/libc
-    ./build.py all
+    cd $HOME/research/datashield/libcxx
+    ./build.py <config>
 
 # Compiling Instrumented Programs
 
@@ -96,7 +93,7 @@ various protections.  There are scripts in `$HOME/research/bin` that make this m
 
 First, you should build a "Hello World" program to make sure your build is sane.
 
-     cd $HOME/research/tests/hand-written/hello_world
+     cd $HOME/research/datashield/test/hand-written/hello_world
      make
      ./test
 
