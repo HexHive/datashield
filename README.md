@@ -88,6 +88,7 @@ Building libcxx is basically the same as building libc.  It has the same three c
 
 You need a lot of options to be able to build with our custom libc, libcxx, and
 various protections.  There are scripts in `$HOME/research/bin` that make this much easier.
+The scripts directory (`$HOME/research/bin`) needs to be in your `PATH` for the scripts to work.
 
 ## Build Hello World
 
