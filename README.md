@@ -4,7 +4,8 @@
 
 For LLVM see: compiler/llvm/LICENSE.txt
 
-For our code: GPLv3
+For our code: this code is dual-licensed under the LLVM license (University of Illinois/NCSA Open Source License) and the GPLv3. 
+Choose whatever fits your requirements.
 
 # Building the Compiler
 
