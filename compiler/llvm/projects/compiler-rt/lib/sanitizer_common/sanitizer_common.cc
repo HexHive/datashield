@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_common.h"
+#include "sanitizer_allocator_interface.h"
 #include "sanitizer_allocator_internal.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
@@ -24,13 +25,7 @@ namespace __sanitizer {
 const char *SanitizerToolName = "SanitizerTool";
 
 atomic_uint32_t current_verbosity;
-
-uptr GetPageSizeCached() {
-  static uptr PageSize;
-  if (!PageSize)
-    PageSize = GetPageSize();
-  return PageSize;
-}
+uptr PageSizeCached;
 
 StaticSpinMutex report_file_mu;
 ReportFile report_file = {&report_file_mu, kStderrFd, "", "", 0};
@@ -105,64 +100,6 @@ uptr stoptheworld_tracer_pid = 0;
 // writing to the same log file.
 uptr stoptheworld_tracer_ppid = 0;
 
-static const int kMaxNumOfInternalDieCallbacks = 5;
-static DieCallbackType InternalDieCallbacks[kMaxNumOfInternalDieCallbacks];
-
-bool AddDieCallback(DieCallbackType callback) {
-  for (int i = 0; i < kMaxNumOfInternalDieCallbacks; i++) {
-    if (InternalDieCallbacks[i] == nullptr) {
-      InternalDieCallbacks[i] = callback;
-      return true;
-    }
-  }
-  return false;
-}
-
-bool RemoveDieCallback(DieCallbackType callback) {
-  for (int i = 0; i < kMaxNumOfInternalDieCallbacks; i++) {
-    if (InternalDieCallbacks[i] == callback) {
-      internal_memmove(&InternalDieCallbacks[i], &InternalDieCallbacks[i + 1],
-                       sizeof(InternalDieCallbacks[0]) *
-                           (kMaxNumOfInternalDieCallbacks - i - 1));
-      InternalDieCallbacks[kMaxNumOfInternalDieCallbacks - 1] = nullptr;
-      return true;
-    }
-  }
-  return false;
-}
-
-static DieCallbackType UserDieCallback;
-void SetUserDieCallback(DieCallbackType callback) {
-  UserDieCallback = callback;
-}
-
-void NORETURN Die() {
-  if (UserDieCallback)
-    UserDieCallback();
-  for (int i = kMaxNumOfInternalDieCallbacks - 1; i >= 0; i--) {
-    if (InternalDieCallbacks[i])
-      InternalDieCallbacks[i]();
-  }
-  if (common_flags()->abort_on_error)
-    Abort();
-  internal__exit(common_flags()->exitcode);
-}
-
-static CheckFailedCallbackType CheckFailedCallback;
-void SetCheckFailedCallback(CheckFailedCallbackType callback) {
-  CheckFailedCallback = callback;
-}
-
-void NORETURN CheckFailed(const char *file, int line, const char *cond,
-                          u64 v1, u64 v2) {
-  if (CheckFailedCallback) {
-    CheckFailedCallback(file, line, cond, v1, v2);
-  }
-  Report("Sanitizer CHECK failed: %s:%d %s (%lld, %lld)\n", file, line, cond,
-                                                            v1, v2);
-  Die();
-}
-
 void NORETURN ReportMmapFailureAndDie(uptr size, const char *mem_type,
                                       const char *mmap_type, error_t err,
                                       bool raw_report) {
@@ -177,7 +114,7 @@ void NORETURN ReportMmapFailureAndDie(uptr size, const char *mem_type,
   Report("ERROR: %s failed to "
          "%s 0x%zx (%zd) bytes of %s (error code: %d)\n",
          SanitizerToolName, mmap_type, size, size, mem_type, err);
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
   DumpProcessMap();
 #endif
   UNREACHABLE("unable to mmap");
@@ -220,6 +157,7 @@ bool ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
 }
 
 typedef bool UptrComparisonFunction(const uptr &a, const uptr &b);
+typedef bool U32ComparisonFunction(const u32 &a, const u32 &b);
 
 template<class T>
 static inline bool CompareLess(const T &a, const T &b) {
@@ -230,25 +168,8 @@ void SortArray(uptr *array, uptr size) {
   InternalSort<uptr*, UptrComparisonFunction>(&array, size, CompareLess);
 }
 
-// We want to map a chunk of address space aligned to 'alignment'.
-// We do it by maping a bit more and then unmaping redundant pieces.
-// We probably can do it with fewer syscalls in some OS-dependent way.
-void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type) {
-// uptr PageSize = GetPageSizeCached();
-  CHECK(IsPowerOfTwo(size));
-  CHECK(IsPowerOfTwo(alignment));
-  uptr map_size = size + alignment;
-  uptr map_res = (uptr)MmapOrDie(map_size, mem_type);
-  uptr map_end = map_res + map_size;
-  uptr res = map_res;
-  if (res & (alignment - 1))  // Not aligned.
-    res = (map_res + alignment) & ~(alignment - 1);
-  uptr end = res + size;
-  if (res != map_res)
-    UnmapOrDie((void*)map_res, res - map_res);
-  if (end != map_end)
-    UnmapOrDie((void*)end, map_end - end);
-  return (void*)res;
+void SortArray(u32 *array, uptr size) {
+  InternalSort<u32*, U32ComparisonFunction>(&array, size, CompareLess);
 }
 
 const char *StripPathPrefix(const char *filepath,
@@ -286,7 +207,7 @@ void ReportErrorSummary(const char *error_message) {
   __sanitizer_report_error_summary(buff.data());
 }
 
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
 void ReportErrorSummary(const char *error_type, const AddressInfo &info) {
   if (!common_flags()->print_summary)
     return;
@@ -338,9 +259,23 @@ void LoadedModule::set(const char *module_name, uptr base_address) {
   base_address_ = base_address;
 }
 
+void LoadedModule::set(const char *module_name, uptr base_address,
+                       ModuleArch arch, u8 uuid[kModuleUUIDSize],
+                       bool instrumented) {
+  set(module_name, base_address);
+  arch_ = arch;
+  internal_memcpy(uuid_, uuid, sizeof(uuid_));
+  instrumented_ = instrumented;
+}
+
 void LoadedModule::clear() {
   InternalFree(full_name_);
+  base_address_ = 0;
+  max_executable_address_ = 0;
   full_name_ = nullptr;
+  arch_ = kModuleArchUnknown;
+  internal_memset(uuid_, 0, kModuleUUIDSize);
+  instrumented_ = false;
   while (!ranges_.empty()) {
     AddressRange *r = ranges_.front();
     ranges_.pop_front();
@@ -352,6 +287,8 @@ void LoadedModule::addAddressRange(uptr beg, uptr end, bool executable) {
   void *mem = InternalAlloc(sizeof(AddressRange));
   AddressRange *r = new(mem) AddressRange(beg, end, executable);
   ranges_.push_back(r);
+  if (executable && end > max_executable_address_)
+    max_executable_address_ = end;
 }
 
 bool LoadedModule::containsAddress(uptr address) const {
@@ -500,6 +437,44 @@ void PrintCmdline() {
   Printf("\n\n");
 }
 
+// Malloc hooks.
+static const int kMaxMallocFreeHooks = 5;
+struct MallocFreeHook {
+  void (*malloc_hook)(const void *, uptr);
+  void (*free_hook)(const void *);
+};
+
+static MallocFreeHook MFHooks[kMaxMallocFreeHooks];
+
+void RunMallocHooks(const void *ptr, uptr size) {
+  for (int i = 0; i < kMaxMallocFreeHooks; i++) {
+    auto hook = MFHooks[i].malloc_hook;
+    if (!hook) return;
+    hook(ptr, size);
+  }
+}
+
+void RunFreeHooks(const void *ptr) {
+  for (int i = 0; i < kMaxMallocFreeHooks; i++) {
+    auto hook = MFHooks[i].free_hook;
+    if (!hook) return;
+    hook(ptr);
+  }
+}
+
+static int InstallMallocFreeHooks(void (*malloc_hook)(const void *, uptr),
+                                  void (*free_hook)(const void *)) {
+  if (!malloc_hook || !free_hook) return 0;
+  for (int i = 0; i < kMaxMallocFreeHooks; i++) {
+    if (MFHooks[i].malloc_hook == nullptr) {
+      MFHooks[i].malloc_hook = malloc_hook;
+      MFHooks[i].free_hook = free_hook;
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
 } // namespace __sanitizer
 
 using namespace __sanitizer;  // NOLINT
@@ -507,6 +482,11 @@ using namespace __sanitizer;  // NOLINT
 extern "C" {
 void __sanitizer_set_report_path(const char *path) {
   report_file.SetReportPath(path);
+}
+
+void __sanitizer_set_report_fd(void *fd) {
+  report_file.fd = (fd_t)reinterpret_cast<uptr>(fd);
+  report_file.fd_pid = internal_getpid();
 }
 
 void __sanitizer_report_error_summary(const char *error_summary) {
@@ -517,4 +497,18 @@ SANITIZER_INTERFACE_ATTRIBUTE
 void __sanitizer_set_death_callback(void (*callback)(void)) {
   SetUserDieCallback(callback);
 }
+
+SANITIZER_INTERFACE_ATTRIBUTE
+int __sanitizer_install_malloc_and_free_hooks(void (*malloc_hook)(const void *,
+                                                                  uptr),
+                                              void (*free_hook)(const void *)) {
+  return InstallMallocFreeHooks(malloc_hook, free_hook);
+}
+
+#if !SANITIZER_GO && !SANITIZER_SUPPORTS_WEAK_HOOKS
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_print_memory_profile(int top_percent) {
+  (void)top_percent;
+}
+#endif
 } // extern "C"

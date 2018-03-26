@@ -47,6 +47,8 @@
 #include "sanitizer_symbolizer.h"
 #include "sanitizer_flags.h"
 
+using namespace __sanitizer;
+
 static const u64 kMagic64 = 0xC0BFFFFFFFFFFF64ULL;
 static const u64 kMagic32 = 0xC0BFFFFFFFFFFF32ULL;
 static const uptr kNumWordsForMagic = SANITIZER_WORDSIZE == 64 ? 1 : 2;
@@ -110,7 +112,6 @@ class CoverageData {
 
   uptr *data();
   uptr size() const;
-  uptr *buffer() const { return pc_buffer; }
 
  private:
   struct NamedPcRange {
@@ -125,9 +126,8 @@ class CoverageData {
 
   // Maximal size pc array may ever grow.
   // We MmapNoReserve this space to ensure that the array is contiguous.
-  static const uptr kPcArrayMaxSize = FIRST_32_SECOND_64(
-      1 << (SANITIZER_ANDROID ? 24 : (SANITIZER_WINDOWS ? 27 : 26)),
-      1 << 27);
+  static const uptr kPcArrayMaxSize =
+      FIRST_32_SECOND_64(1 << (SANITIZER_ANDROID ? 24 : 26), 1 << 27);
   // The amount file mapping for the pc array is grown by.
   static const uptr kPcArrayMmapSize = 64 * 1024;
 
@@ -142,8 +142,6 @@ class CoverageData {
   uptr pc_array_mapped_size;
   // Descriptor of the file mapped pc array.
   fd_t pc_fd;
-
-  uptr *pc_buffer;
 
   // Vector of coverage guard arrays, protected by mu.
   InternalMmapVectorNoCtor<s32*> guard_array_vec;
@@ -216,11 +214,6 @@ void CoverageData::Enable() {
     atomic_store(&pc_array_size, kPcArrayMaxSize, memory_order_relaxed);
   }
 
-  pc_buffer = nullptr;
-  if (common_flags()->coverage_pc_buffer)
-    pc_buffer = reinterpret_cast<uptr *>(MmapNoReserveOrDie(
-        sizeof(uptr) * kPcArrayMaxSize, "CovInit::pc_buffer"));
-
   cc_array = reinterpret_cast<uptr **>(MmapNoReserveOrDie(
       sizeof(uptr *) * kCcArrayMaxSize, "CovInit::cc_array"));
   atomic_store(&cc_array_size, kCcArrayMaxSize, memory_order_relaxed);
@@ -257,10 +250,6 @@ void CoverageData::Disable() {
   if (cc_array) {
     UnmapOrDie(cc_array, sizeof(uptr *) * kCcArrayMaxSize);
     cc_array = nullptr;
-  }
-  if (pc_buffer) {
-    UnmapOrDie(pc_buffer, sizeof(uptr) * kPcArrayMaxSize);
-    pc_buffer = nullptr;
   }
   if (tr_event_array) {
     UnmapOrDie(tr_event_array,
@@ -430,7 +419,6 @@ void CoverageData::Add(uptr pc, u32 *guard) {
            atomic_load(&pc_array_size, memory_order_acquire));
   uptr counter = atomic_fetch_add(&coverage_counter, 1, memory_order_relaxed);
   pc_array[idx] = BundlePcAndCounter(pc, counter);
-  if (pc_buffer) pc_buffer[counter] = pc;
 }
 
 // Registers a pair caller=>callee.
@@ -783,9 +771,34 @@ void CoverageData::GetRangeOffsets(const NamedPcRange& r, Symbolizer* sym,
     (*offsets)[i] = UnbundlePc((*offsets)[i]);
 }
 
-static void GenerateHtmlReport(const InternalMmapVector<char *> &sancov_argv) {
-  if (!common_flags()->html_cov_report || sancov_argv[0] == nullptr) {
+static void GenerateHtmlReport(const InternalMmapVector<char *> &cov_files) {
+  if (!common_flags()->html_cov_report) {
     return;
+  }
+  char *sancov_path = FindPathToBinary(common_flags()->sancov_path);
+  if (sancov_path == nullptr) {
+    return;
+  }
+
+  InternalMmapVector<char *> sancov_argv(cov_files.size() * 2 + 3);
+  sancov_argv.push_back(sancov_path);
+  sancov_argv.push_back(internal_strdup("-html-report"));
+  auto argv_deleter = at_scope_exit([&] {
+    for (uptr i = 0; i < sancov_argv.size(); ++i) {
+      InternalFree(sancov_argv[i]);
+    }
+  });
+
+  for (const auto &cov_file : cov_files) {
+    sancov_argv.push_back(internal_strdup(cov_file));
+  }
+
+  {
+    ListOfModules modules;
+    modules.init();
+    for (const LoadedModule &module : modules) {
+      sancov_argv.push_back(internal_strdup(module.full_name()));
+    }
   }
 
   InternalScopedString report_path(kMaxPathLength);
@@ -795,10 +808,8 @@ static void GenerateHtmlReport(const InternalMmapVector<char *> &sancov_argv) {
                             kInvalidFd /* stdin */, report_fd /* std_out */);
   if (pid > 0) {
     int result = WaitForProcess(pid);
-    if (result == 0) {
-      VReport(1, " CovDump: html report generated to %s (%d)\n",
-              report_path.data(), result);
-    }
+    if (result == 0)
+      Printf("coverage report generated to %s\n", report_path.data());
   }
 }
 
@@ -809,16 +820,10 @@ void CoverageData::DumpOffsets() {
   InternalMmapVector<uptr> offsets(0);
   InternalScopedString path(kMaxPathLength);
 
-  InternalMmapVector<char *> sancov_argv(module_name_vec.size() + 2);
-  sancov_argv.push_back(FindPathToBinary(common_flags()->sancov_path));
-  if (GetArgv() != nullptr) {
-    sancov_argv.push_back(internal_strdup("-obj"));
-    sancov_argv.push_back(internal_strdup(GetArgv()[0]));
-  }
-  sancov_argv.push_back(internal_strdup("-html-report"));
-  auto argv_deleter = at_scope_exit([&] {
-    for (uptr i = 0; i < sancov_argv.size(); ++i) {
-      InternalFree(sancov_argv[i]);
+  InternalMmapVector<char *> cov_files(module_name_vec.size());
+  auto cov_files_deleter = at_scope_exit([&] {
+    for (uptr i = 0; i < cov_files.size(); ++i) {
+      InternalFree(cov_files[i]);
     }
   });
 
@@ -846,15 +851,14 @@ void CoverageData::DumpOffsets() {
       if (fd == kInvalidFd) continue;
       WriteToFile(fd, offsets.data(), offsets.size() * sizeof(offsets[0]));
       CloseFile(fd);
-      sancov_argv.push_back(internal_strdup(path.data()));
+      cov_files.push_back(internal_strdup(path.data()));
       VReport(1, " CovDump: %s: %zd PCs written\n", path.data(), num_offsets);
     }
   }
   if (cov_fd != kInvalidFd)
     CloseFile(cov_fd);
 
-  sancov_argv.push_back(nullptr);
-  GenerateHtmlReport(sancov_argv);
+  GenerateHtmlReport(cov_files);
 }
 
 void CoverageData::DumpAll() {
@@ -950,6 +954,7 @@ SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov_init() {
 }
 SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov_dump() {
   coverage_data.DumpAll();
+  __sanitizer_dump_trace_pc_guard_coverage();
 }
 SANITIZER_INTERFACE_ATTRIBUTE void
 __sanitizer_cov_module_init(s32 *guards, uptr npcs, u8 *counters,
@@ -1003,12 +1008,6 @@ uptr __sanitizer_get_coverage_guards(uptr **data) {
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-uptr __sanitizer_get_coverage_pc_buffer(uptr **data) {
-  *data = coverage_data.buffer();
-  return __sanitizer_get_total_unique_coverage();
-}
-
-SANITIZER_INTERFACE_ATTRIBUTE
 uptr __sanitizer_get_number_of_counters() {
   return coverage_data.GetNumberOf8bitCounters();
 }
@@ -1018,8 +1017,26 @@ uptr __sanitizer_update_counter_bitset_and_clear_counters(u8 *bitset) {
   return coverage_data.Update8bitCounterBitsetAndClearCounters(bitset);
 }
 // Default empty implementations (weak). Users should redefine them.
+#if !SANITIZER_WINDOWS  // weak does not work on Windows.
 SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
 void __sanitizer_cov_trace_cmp() {}
 SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_cmp1() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_cmp2() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_cmp4() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_cmp8() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
 void __sanitizer_cov_trace_switch() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_div4() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_div8() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_gep() {}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_pc_indir() {}
+#endif  // !SANITIZER_WINDOWS
 } // extern "C"
