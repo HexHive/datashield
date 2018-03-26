@@ -1,5 +1,15 @@
-; RUN: llc < %s -mtriple=i686-unknown-linux-gnu | FileCheck %s
-; RUN: llc < %s -mtriple=x86_64-unknown-linux-gnu | FileCheck %s
+; RUN: llc < %s -mtriple=i686-unknown-linux-gnu -fixup-byte-word-insts=0 | \
+; RUN:   FileCheck -check-prefix=CHECK -check-prefix=BWOFF %s
+; RUN: llc < %s -mtriple=i686-unknown-linux-gnu -fixup-byte-word-insts=1 | \
+; RUN:   FileCheck -check-prefix=CHECK -check-prefix=BWON %s
+; RUN: llc < %s -mtriple=x86_64-unknown-linux-gnu -fixup-byte-word-insts=0 | \
+; RUN:   FileCheck -check-prefix=CHECK -check-prefix=BWOFF %s
+; RUN: llc < %s -mtriple=i686-unknown-linux-gnu -fixup-byte-word-insts=1 | \
+; RUN:   FileCheck -check-prefix=CHECK -check-prefix=BWON %s
+; RUN: llc < %s -mtriple=x86_64-apple-darwin -fixup-byte-word-insts=0 | \
+; RUN:   FileCheck -check-prefix=DARWIN -check-prefix=DARWIN-BWOFF %s
+; RUN: llc < %s -mtriple=x86_64-apple-darwin -fixup-byte-word-insts=1 | \
+; RUN:   FileCheck -check-prefix=DARWIN -check-prefix=DARWIN-BWON %s
 
 
 @x = common global i32 0, align 4
@@ -29,6 +39,13 @@ entry:
 ; CHECK:			 cmp
 ; CHECK-NEXT:  sete
 ; CHECK-NEXT:  ret
+
+; Except on Darwin, for legacy reasons.
+; DARWIN-LABEL: unsigned_i8:
+; DARWIN:       xorl
+; DARWIN-NEXT:  cmp
+; DARWIN-NEXT:  sete
+; DARWIN-NEXT:  ret
 }
 
 define signext i8 @signed_i8() {
@@ -43,6 +60,13 @@ entry:
 ; CHECK:			 cmp
 ; CHECK-NEXT:  sete
 ; CHECK-NEXT:  ret
+
+; Except on Darwin, for legacy reasons.
+; DARWIN-LABEL: signed_i8:
+; DARWIN:       xorl
+; DARWIN-NEXT:  cmp
+; DARWIN-NEXT:  sete
+; DARWIN-NEXT:  ret
 }
 
 @a = common global i16 0
@@ -56,9 +80,18 @@ entry:
 
 ; i16 return values are not extended.
 ; CHECK-LABEL: unsigned_i16:
-; CHECK:			 movw
+; BWOFF:       movw
+; BWON:        movzwl
 ; CHECK-NEXT:  addw
 ; CHECK-NEXT:  ret
+
+; Except on Darwin, for legacy reasons.
+; DARWIN-LABEL: unsigned_i16:
+; DARWIN-BWOFF: movw
+; DARWIN-BWON:  movzwl
+; DARWIN-NEXT:  addw
+; DARWIN-NEXT:  movzwl
+; DARWIN-NEXT:  ret
 }
 
 

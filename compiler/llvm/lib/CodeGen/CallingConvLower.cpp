@@ -23,6 +23,8 @@
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
+#include <algorithm>
+
 using namespace llvm;
 
 CCState::CCState(CallingConv::ID CC, bool isVarArg, MachineFunction &mf,
@@ -62,6 +64,22 @@ void CCState::HandleByVal(unsigned ValNo, MVT ValVT,
 void CCState::MarkAllocated(unsigned Reg) {
   for (MCRegAliasIterator AI(Reg, &TRI, true); AI.isValid(); ++AI)
     UsedRegs[*AI/32] |= 1 << (*AI&31);
+}
+
+bool CCState::IsShadowAllocatedReg(unsigned Reg) const {
+  if (!isAllocated(Reg))
+    return false;
+
+  for (auto const &ValAssign : Locs) {
+    if (ValAssign.isRegLoc()) {
+      for (MCRegAliasIterator AI(ValAssign.getLocReg(), &TRI, true);
+           AI.isValid(); ++AI) {
+        if (*AI == Reg)
+          return false;
+      }
+    }
+  }
+  return true;
 }
 
 /// Analyze an array of argument values,
@@ -248,4 +266,40 @@ void CCState::analyzeMustTailForwardedRegisters(
       Forwards.push_back(ForwardedRegister(VReg, PReg, RegVT));
     }
   }
+}
+
+bool CCState::resultsCompatible(CallingConv::ID CalleeCC,
+                                CallingConv::ID CallerCC, MachineFunction &MF,
+                                LLVMContext &C,
+                                const SmallVectorImpl<ISD::InputArg> &Ins,
+                                CCAssignFn CalleeFn, CCAssignFn CallerFn) {
+  if (CalleeCC == CallerCC)
+    return true;
+  SmallVector<CCValAssign, 4> RVLocs1;
+  CCState CCInfo1(CalleeCC, false, MF, RVLocs1, C);
+  CCInfo1.AnalyzeCallResult(Ins, CalleeFn);
+
+  SmallVector<CCValAssign, 4> RVLocs2;
+  CCState CCInfo2(CallerCC, false, MF, RVLocs2, C);
+  CCInfo2.AnalyzeCallResult(Ins, CallerFn);
+
+  if (RVLocs1.size() != RVLocs2.size())
+    return false;
+  for (unsigned I = 0, E = RVLocs1.size(); I != E; ++I) {
+    const CCValAssign &Loc1 = RVLocs1[I];
+    const CCValAssign &Loc2 = RVLocs2[I];
+    if (Loc1.getLocInfo() != Loc2.getLocInfo())
+      return false;
+    bool RegLoc1 = Loc1.isRegLoc();
+    if (RegLoc1 != Loc2.isRegLoc())
+      return false;
+    if (RegLoc1) {
+      if (Loc1.getLocReg() != Loc2.getLocReg())
+        return false;
+    } else {
+      if (Loc1.getLocMemOffset() != Loc2.getLocMemOffset())
+        return false;
+    }
+  }
+  return true;
 }

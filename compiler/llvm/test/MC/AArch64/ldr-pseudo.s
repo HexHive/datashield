@@ -1,4 +1,4 @@
-//RUN: llvm-mc  -triple=aarch64-linux-gnu %s | FileCheck %s
+//RUN: llvm-mc  -triple=aarch64-linux-gnu -print-imm-hex %s | FileCheck %s
 
 //
 // Check that large constants are converted to ldr from constant pool
@@ -8,17 +8,17 @@
 // CHECK-LABEL: f1:
 f1:
   ldr x0, =0x1234
-// CHECK: movz    x0, #0x1234
+// CHECK: mov    x0, #0x1234
   ldr w1, =0x4567
-// CHECK:  movz    w1, #0x4567
+// CHECK:  mov    w1, #0x4567
   ldr x0, =0x12340000
-// CHECK:  movz    x0, #0x1234, lsl #16
+// CHECK:  mov    x0, #0x12340000
   ldr w1, =0x45670000
-// CHECK: movz    w1, #0x4567, lsl #16
+// CHECK: mov    w1, #0x45670000
   ldr x0, =0xabc00000000
-// CHECK: movz    x0, #0xabc, lsl #32
+// CHECK: mov    x0, #0xabc00000000
   ldr x0, =0xbeef000000000000
-// CHECK: movz    x0, #0xbeef, lsl #48
+// CHECK: mov    x0, #-0x4111000000000000
 
 .section b,"ax",@progbits
 // CHECK-LABEL: f3:
@@ -55,7 +55,7 @@ f5:
   adds x0, x0, #1
   adds x0, x0, #1
   ldr w0, =0x10004
-// CHECK: ldr w0, .Ltmp[[TMP4:[0-9]+]]
+// CHECK: ldr w0, .Ltmp[[TMP3:[0-9]+]]
   adds x0, x0, #1
   adds x0, x0, #1
   adds x0, x0, #1
@@ -128,7 +128,7 @@ f13:
   adds x0, x0, #1
   adds x0, x0, #1
   ldr w0, =0x101
-// CHECK: movz w0, #0x101
+// CHECK: mov w0, #0x101
   adds x0, x0, #1
   adds x0, x0, #1
   ldr w0, =bar
@@ -225,9 +225,6 @@ f18:
 // CHECK: .p2align 2
 // CHECK: .Ltmp[[TMP3]]
 // CHECK: .word 65540
-// CHECK: .p2align 2
-// CHECK: .Ltmp[[TMP4]]
-// CHECK: .word 65540
 
 // CHECK: .section e,"ax",@progbits
 // CHECK: .p2align 2
@@ -314,6 +311,3 @@ f18:
 // CHECK: .p2align 2
 // CHECK: .Ltmp[[TMP25]]
 // CHECK: .word 3276900
-// CHECK: .p2align 3
-// CHECK: .Ltmp[[TMP26]]
-// CHECK: .xword 3276900

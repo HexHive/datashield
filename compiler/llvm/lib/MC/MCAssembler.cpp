@@ -65,9 +65,9 @@ STATISTIC(RelaxedInstructions, "Number of relaxed instructions");
 
 /* *** */
 
-MCAssembler::MCAssembler(MCContext &Context_, MCAsmBackend &Backend_,
-                         MCCodeEmitter &Emitter_, MCObjectWriter &Writer_)
-    : Context(Context_), Backend(Backend_), Emitter(Emitter_), Writer(Writer_),
+MCAssembler::MCAssembler(MCContext &Context, MCAsmBackend &Backend,
+                         MCCodeEmitter &Emitter, MCObjectWriter &Writer)
+    : Context(Context), Backend(Backend), Emitter(Emitter), Writer(Writer),
       BundleAlignSize(0), RelaxAll(false), SubsectionsViaSymbols(false),
       IncrementalLinkerCompatible(false), ELFHeaderEFlags(0) {
   VersionMinInfo.Major = 0; // Major version == 0 for "none specified"
@@ -278,22 +278,29 @@ uint64_t MCAssembler::computeFragmentSize(const MCAsmLayout &Layout,
   case MCFragment::FT_Org: {
     const MCOrgFragment &OF = cast<MCOrgFragment>(F);
     MCValue Value;
-    if (!OF.getOffset().evaluateAsValue(Value, Layout))
-      report_fatal_error("expected assembly-time absolute expression");
+    if (!OF.getOffset().evaluateAsValue(Value, Layout)) {
+      getContext().reportError(OF.getLoc(),
+                               "expected assembly-time absolute expression");
+        return 0;
+    }
 
-    // FIXME: We need a way to communicate this error.
     uint64_t FragmentOffset = Layout.getFragmentOffset(&OF);
     int64_t TargetLocation = Value.getConstant();
     if (const MCSymbolRefExpr *A = Value.getSymA()) {
       uint64_t Val;
-      if (!Layout.getSymbolOffset(A->getSymbol(), Val))
-        report_fatal_error("expected absolute expression");
+      if (!Layout.getSymbolOffset(A->getSymbol(), Val)) {
+        getContext().reportError(OF.getLoc(), "expected absolute expression");
+        return 0;
+      }
       TargetLocation += Val;
     }
     int64_t Size = TargetLocation - FragmentOffset;
-    if (Size < 0 || Size >= 0x40000000)
-      report_fatal_error("invalid .org offset '" + Twine(TargetLocation) +
-                         "' (at offset '" + Twine(FragmentOffset) + "')");
+    if (Size < 0 || Size >= 0x40000000) {
+      getContext().reportError(
+          OF.getLoc(), "invalid .org offset '" + Twine(TargetLocation) +
+                           "' (at offset '" + Twine(FragmentOffset) + "')");
+      return 0;
+    }
     return Size;
   }
 
@@ -575,8 +582,8 @@ void MCAssembler::writeSectionData(const MCSection *Sec,
         // into a virtual section. This is to support clients which use standard
         // directives to fill the contents of virtual sections.
         const MCDataFragment &DF = cast<MCDataFragment>(F);
-        assert(DF.fixup_begin() == DF.fixup_end() &&
-               "Cannot have fixups in virtual section!");
+        if (DF.fixup_begin() != DF.fixup_end())
+          report_fatal_error("cannot have fixups in virtual section!");
         for (unsigned i = 0, e = DF.getContents().size(); i != e; ++i)
           if (DF.getContents()[i]) {
             if (auto *ELFSec = dyn_cast<const MCSectionELF>(Sec))
@@ -660,7 +667,8 @@ void MCAssembler::layout(MCAsmLayout &Layout) {
 
   // Layout until everything fits.
   while (layoutOnce(Layout))
-    continue;
+    if (getContext().hadError())
+      return;
 
   DEBUG_WITH_TYPE("mc-dump", {
       llvm::errs() << "assembler backend - post-relaxation\n--\n";
@@ -765,7 +773,7 @@ bool MCAssembler::relaxInstruction(MCAsmLayout &Layout,
   // Relax the fragment.
 
   MCInst Relaxed;
-  getBackend().relaxInstruction(F.getInst(), Relaxed);
+  getBackend().relaxInstruction(F.getInst(), F.getSubtargetInfo(), Relaxed);
 
   // Encode the new instruction.
   //
@@ -912,6 +920,9 @@ bool MCAssembler::layoutOnce(MCAsmLayout &Layout) {
 void MCAssembler::finishLayout(MCAsmLayout &Layout) {
   // The layout is done. Mark every fragment as valid.
   for (unsigned int i = 0, n = Layout.getSectionOrder().size(); i != n; ++i) {
-    Layout.getFragmentOffset(&*Layout.getSectionOrder()[i]->rbegin());
+    MCSection &Section = *Layout.getSectionOrder()[i];
+    Layout.getFragmentOffset(&*Section.rbegin());
+    computeFragmentSize(Layout, *Section.rbegin());
   }
+  getBackend().finishLayout(*this, Layout);
 }

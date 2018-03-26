@@ -281,6 +281,27 @@ inw	(%dx), %ax
 in	(%dx), %eax
 inl	(%dx), %eax
 
+//PR15455
+
+// permitted invalid memory forms	
+outs	(%rsi), (%dx) 
+// CHECK: outsw	(%rsi), %dx
+outsb	(%rsi), (%dx)
+// CHECK: outsb	(%rsi), %dx
+outsw	(%rsi), (%dx)
+// CHECK: outsw	(%rsi), %dx
+outsl	(%rsi), (%dx)
+// CHECK: outsl	(%rsi), %dx
+
+ins	(%dx), %es:(%rdi)
+// CHECK: insw	%dx, %es:(%rdi)
+insb	(%dx), %es:(%rdi)
+// CHECK: insb	%dx, %es:(%rdi)
+insw	(%dx), %es:(%rdi)
+// CHECK: insw	%dx, %es:(%rdi)
+insl	(%dx), %es:(%rdi)
+// CHECK: insl	%dx, %es:(%rdi)	
+
 // rdar://8431422
 
 // CHECK: fxch %st(1)
@@ -875,6 +896,38 @@ lock/incl 1(%rsp)
 // CHECK: lock
 // CHECK: incl 1(%rsp)
 
+
+lock addq %rsi, (%rdi)
+// CHECK: lock
+// CHECK: encoding: [0xf0]
+// CHECK: addq %rsi, (%rdi)
+// CHECK: encoding: [0x48,0x01,0x37]
+
+lock subq %rsi, (%rdi)
+// CHECK: lock
+// CHECK: encoding: [0xf0]
+// CHECK: subq %rsi, (%rdi)
+// CHECK: encoding: [0x48,0x29,0x37]
+
+lock andq %rsi, (%rdi)
+// CHECK: lock
+// CHECK: encoding: [0xf0]
+// CHECK: andq %rsi, (%rdi)
+// CHECK: encoding: [0x48,0x21,0x37]
+
+lock orq %rsi, (%rdi)
+// CHECK: lock
+// CHECK: encoding: [0xf0]
+// CHECK: orq %rsi, (%rdi)
+// CHECK: encoding: [0x48,0x09,0x37]
+
+lock xorq %rsi, (%rdi)
+// CHECK: lock
+// CHECK: encoding: [0xf0]
+// CHECK: xorq %rsi, (%rdi)
+// CHECK: encoding: [0x48,0x31,0x37]
+
+
 // rdar://8033482
 rep movsl
 // CHECK: rep
@@ -1442,3 +1495,7 @@ vmovq %xmm0, %rax
 // CHECK: 	mwaitx
 // CHECK:  encoding: [0x0f,0x01,0xfb]
         	mwaitx %rax, %rcx, %rbx
+
+// CHECK: 	movl %r15d, (%r15,%r15)
+// CHECK:  encoding: [0x47,0x89,0x3c,0x3f]
+movl %r15d, (%r15,%r15)

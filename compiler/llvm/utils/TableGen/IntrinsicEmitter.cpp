@@ -38,19 +38,16 @@ public:
 
   void EmitPrefix(raw_ostream &OS);
 
-  void EmitEnumInfo(const std::vector<CodeGenIntrinsic> &Ints,
-                    raw_ostream &OS);
-
-  void EmitIntrinsicToNameTable(const std::vector<CodeGenIntrinsic> &Ints,
+  void EmitEnumInfo(const CodeGenIntrinsicTable &Ints, raw_ostream &OS);
+  void EmitTargetInfo(const CodeGenIntrinsicTable &Ints, raw_ostream &OS);
+  void EmitIntrinsicToNameTable(const CodeGenIntrinsicTable &Ints,
                                 raw_ostream &OS);
-  void EmitIntrinsicToOverloadTable(const std::vector<CodeGenIntrinsic> &Ints,
+  void EmitIntrinsicToOverloadTable(const CodeGenIntrinsicTable &Ints,
                                     raw_ostream &OS);
-  void EmitGenerator(const std::vector<CodeGenIntrinsic> &Ints,
-                     raw_ostream &OS);
-  void EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints,
-                      raw_ostream &OS);
-  void EmitIntrinsicToBuiltinMap(const std::vector<CodeGenIntrinsic> &Ints,
-                                 bool IsGCC, raw_ostream &OS);
+  void EmitGenerator(const CodeGenIntrinsicTable &Ints, raw_ostream &OS);
+  void EmitAttributes(const CodeGenIntrinsicTable &Ints, raw_ostream &OS);
+  void EmitIntrinsicToBuiltinMap(const CodeGenIntrinsicTable &Ints, bool IsGCC,
+                                 raw_ostream &OS);
   void EmitSuffix(raw_ostream &OS);
 };
 } // End anonymous namespace
@@ -62,7 +59,7 @@ public:
 void IntrinsicEmitter::run(raw_ostream &OS) {
   emitSourceFileHeader("Intrinsic Function Source Fragment", OS);
 
-  std::vector<CodeGenIntrinsic> Ints = LoadIntrinsics(Records, TargetOnly);
+  CodeGenIntrinsicTable Ints(Records, TargetOnly);
 
   if (TargetOnly && !Ints.empty())
     TargetPrefix = Ints[0].TargetPrefix;
@@ -71,6 +68,9 @@ void IntrinsicEmitter::run(raw_ostream &OS) {
 
   // Emit the enum information.
   EmitEnumInfo(Ints, OS);
+
+  // Emit the target metadata.
+  EmitTargetInfo(Ints, OS);
 
   // Emit the intrinsic ID -> name table.
   EmitIntrinsicToNameTable(Ints, OS);
@@ -114,7 +114,7 @@ void IntrinsicEmitter::EmitSuffix(raw_ostream &OS) {
         "#endif\n\n";
 }
 
-void IntrinsicEmitter::EmitEnumInfo(const std::vector<CodeGenIntrinsic> &Ints,
+void IntrinsicEmitter::EmitEnumInfo(const CodeGenIntrinsicTable &Ints,
                                     raw_ostream &OS) {
   OS << "// Enum values for Intrinsics.h\n";
   OS << "#ifdef GET_INTRINSIC_ENUM_VALUES\n";
@@ -128,9 +128,25 @@ void IntrinsicEmitter::EmitEnumInfo(const std::vector<CodeGenIntrinsic> &Ints,
   OS << "#endif\n\n";
 }
 
-void IntrinsicEmitter::
-EmitIntrinsicToNameTable(const std::vector<CodeGenIntrinsic> &Ints,
-                         raw_ostream &OS) {
+void IntrinsicEmitter::EmitTargetInfo(const CodeGenIntrinsicTable &Ints,
+                                    raw_ostream &OS) {
+  OS << "// Target mapping\n";
+  OS << "#ifdef GET_INTRINSIC_TARGET_DATA\n";
+  OS << "struct IntrinsicTargetInfo {\n"
+     << "  StringRef Name;\n"
+     << "  size_t Offset;\n"
+     << "  size_t Count;\n"
+     << "};\n";
+  OS << "static const IntrinsicTargetInfo TargetInfos[] = {\n";
+  for (auto Target : Ints.Targets)
+    OS << "  {\"" << Target.Name << "\", " << Target.Offset << ", "
+       << Target.Count << "},\n";
+  OS << "};\n";
+  OS << "#endif\n\n";
+}
+
+void IntrinsicEmitter::EmitIntrinsicToNameTable(
+    const CodeGenIntrinsicTable &Ints, raw_ostream &OS) {
   OS << "// Intrinsic ID to name table\n";
   OS << "#ifdef GET_INTRINSIC_NAME_TABLE\n";
   OS << "  // Note that entry #0 is the invalid intrinsic!\n";
@@ -139,9 +155,8 @@ EmitIntrinsicToNameTable(const std::vector<CodeGenIntrinsic> &Ints,
   OS << "#endif\n\n";
 }
 
-void IntrinsicEmitter::
-EmitIntrinsicToOverloadTable(const std::vector<CodeGenIntrinsic> &Ints,
-                         raw_ostream &OS) {
+void IntrinsicEmitter::EmitIntrinsicToOverloadTable(
+    const CodeGenIntrinsicTable &Ints, raw_ostream &OS) {
   OS << "// Intrinsic ID to overload bitset\n";
   OS << "#ifdef GET_INTRINSIC_OVERLOAD_TABLE\n";
   OS << "static const uint8_t OTable[] = {\n";
@@ -198,10 +213,11 @@ enum IIT_Info {
   IIT_HALF_VEC_ARG = 30,
   IIT_SAME_VEC_WIDTH_ARG = 31,
   IIT_PTR_TO_ARG = 32,
-  IIT_VEC_OF_PTRS_TO_ELT = 33,
-  IIT_I128 = 34,
-  IIT_V512 = 35,
-  IIT_V1024 = 36
+  IIT_PTR_TO_ELT = 33,
+  IIT_VEC_OF_PTRS_TO_ELT = 34,
+  IIT_I128 = 35,
+  IIT_V512 = 36,
+  IIT_V1024 = 37
 };
 
 
@@ -236,7 +252,7 @@ static void EncodeFixedValueType(MVT::SimpleValueType VT,
 }
 
 #if defined(_MSC_VER) && !defined(__clang__)
-#pragma optimize("",off) // MSVC 2010 optimizer can't deal with this function.
+#pragma optimize("",off) // MSVC 2015 optimizer can't deal with this function.
 #endif
 
 static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
@@ -262,6 +278,8 @@ static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
       Sig.push_back(IIT_PTR_TO_ARG);
     else if (R->isSubClassOf("LLVMVectorOfPointersToElt"))
       Sig.push_back(IIT_VEC_OF_PTRS_TO_ELT);
+    else if (R->isSubClassOf("LLVMPointerToElt"))
+      Sig.push_back(IIT_PTR_TO_ELT);
     else
       Sig.push_back(IIT_ARG);
     return Sig.push_back((Number << 3) | ArgCodes[Number]);
@@ -272,10 +290,10 @@ static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
   unsigned Tmp = 0;
   switch (VT) {
   default: break;
-  case MVT::iPTRAny: ++Tmp; // FALL THROUGH.
-  case MVT::vAny: ++Tmp; // FALL THROUGH.
-  case MVT::fAny: ++Tmp; // FALL THROUGH.
-  case MVT::iAny: ++Tmp; // FALL THROUGH.
+  case MVT::iPTRAny: ++Tmp; LLVM_FALLTHROUGH;
+  case MVT::vAny: ++Tmp;    LLVM_FALLTHROUGH;
+  case MVT::fAny: ++Tmp;    LLVM_FALLTHROUGH;
+  case MVT::iAny: ++Tmp;    LLVM_FALLTHROUGH;
   case MVT::Any: {
     // If this is an "any" valuetype, then the type is the type of the next
     // type in the list specified to getIntrinsic().
@@ -363,7 +381,7 @@ static void printIITEntry(raw_ostream &OS, unsigned char X) {
   OS << (unsigned)X;
 }
 
-void IntrinsicEmitter::EmitGenerator(const std::vector<CodeGenIntrinsic> &Ints,
+void IntrinsicEmitter::EmitGenerator(const CodeGenIntrinsicTable &Ints,
                                      raw_ostream &OS) {
   // If we can compute a 32-bit fixed encoding for this intrinsic, do so and
   // capture it in this vector, otherwise store a ~0U.
@@ -462,8 +480,8 @@ struct AttributeComparator {
       return R->isConvergent;
 
     // Try to order by readonly/readnone attribute.
-    CodeGenIntrinsic::ModRefKind LK = L->ModRef;
-    CodeGenIntrinsic::ModRefKind RK = R->ModRef;
+    CodeGenIntrinsic::ModRefBehavior LK = L->ModRef;
+    CodeGenIntrinsic::ModRefBehavior RK = R->ModRef;
     if (LK != RK) return (LK > RK);
 
     // Order by argument attributes.
@@ -474,8 +492,8 @@ struct AttributeComparator {
 } // End anonymous namespace
 
 /// EmitAttributes - This emits the Intrinsic::getAttributes method.
-void IntrinsicEmitter::
-EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
+void IntrinsicEmitter::EmitAttributes(const CodeGenIntrinsicTable &Ints,
+                                      raw_ostream &OS) {
   OS << "// Add parameter attributes that are not common to all intrinsics.\n";
   OS << "#ifdef GET_INTRINSIC_ATTRIBUTES\n";
   if (TargetOnly)
@@ -548,10 +566,22 @@ EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
             OS << "Attribute::NoCapture";
             addComma = true;
             break;
+          case CodeGenIntrinsic::Returned:
+            if (addComma)
+              OS << ",";
+            OS << "Attribute::Returned";
+            addComma = true;
+            break;
           case CodeGenIntrinsic::ReadOnly:
             if (addComma)
               OS << ",";
             OS << "Attribute::ReadOnly";
+            addComma = true;
+            break;
+          case CodeGenIntrinsic::WriteOnly:
+            if (addComma)
+              OS << ",";
+            OS << "Attribute::WriteOnly";
             addComma = true;
             break;
           case CodeGenIntrinsic::ReadNone:
@@ -616,11 +646,55 @@ EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
           OS << ",";
         OS << "Attribute::ReadOnly";
         break;
+      case CodeGenIntrinsic::ReadInaccessibleMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::ReadOnly,";
+        OS << "Attribute::InaccessibleMemOnly";
+        break;
+      case CodeGenIntrinsic::ReadInaccessibleMemOrArgMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::ReadOnly,";
+        OS << "Attribute::InaccessibleMemOrArgMemOnly";
+        break;
+      case CodeGenIntrinsic::WriteArgMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::WriteOnly,";
+        OS << "Attribute::ArgMemOnly";
+        break;
+      case CodeGenIntrinsic::WriteMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::WriteOnly";
+        break;
+      case CodeGenIntrinsic::WriteInaccessibleMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::WriteOnly,";
+        OS << "Attribute::InaccessibleMemOnly";
+        break;
+      case CodeGenIntrinsic::WriteInaccessibleMemOrArgMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::WriteOnly,";
+        OS << "Attribute::InaccessibleMemOrArgOnly";
+        break;
       case CodeGenIntrinsic::ReadWriteArgMem:
         if (addComma)
           OS << ",";
         OS << "Attribute::ArgMemOnly";
         break;
+      case CodeGenIntrinsic::ReadWriteInaccessibleMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::InaccessibleMemOnly";
+        break;
+      case CodeGenIntrinsic::ReadWriteInaccessibleMemOrArgMem:
+        if (addComma)
+          OS << ",";
+        OS << "Attribute::InaccessibleMemOrArgMemOnly";
       case CodeGenIntrinsic::ReadWriteMem:
         break;
       }
@@ -647,7 +721,7 @@ EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
 }
 
 void IntrinsicEmitter::EmitIntrinsicToBuiltinMap(
-    const std::vector<CodeGenIntrinsic> &Ints, bool IsGCC, raw_ostream &OS) {
+    const CodeGenIntrinsicTable &Ints, bool IsGCC, raw_ostream &OS) {
   StringRef CompilerName = (IsGCC ? "GCC" : "MS");
   typedef std::map<std::string, std::map<std::string, std::string>> BIMTy;
   BIMTy BuiltinMap;
@@ -676,11 +750,11 @@ void IntrinsicEmitter::EmitIntrinsicToBuiltinMap(
   if (TargetOnly) {
     OS << "static " << TargetPrefix << "Intrinsic::ID "
        << "getIntrinsicFor" << CompilerName << "Builtin(const char "
-       << "*TargetPrefixStr, const char *BuiltinNameStr) {\n";
+       << "*TargetPrefixStr, StringRef BuiltinNameStr) {\n";
   } else {
     OS << "Intrinsic::ID Intrinsic::getIntrinsicFor" << CompilerName
        << "Builtin(const char "
-       << "*TargetPrefixStr, const char *BuiltinNameStr) {\n";
+       << "*TargetPrefixStr, StringRef BuiltinNameStr) {\n";
   }
   OS << "  static const char BuiltinNames[] = {\n";
   Table.EmitCharArray(OS);
@@ -692,13 +766,11 @@ void IntrinsicEmitter::EmitIntrinsicToBuiltinMap(
   OS << "    const char *getName() const {\n";
   OS << "      return &BuiltinNames[StrTabOffset];\n";
   OS << "    }\n";
-  OS << "    bool operator<(const char *RHS) const {\n";
-  OS << "      return strcmp(getName(), RHS) < 0;\n";
+  OS << "    bool operator<(StringRef RHS) const {\n";
+  OS << "      return strncmp(getName(), RHS.data(), RHS.size()) < 0;\n";
   OS << "    }\n";
   OS << "  };\n";
 
-
-  OS << "  StringRef BuiltinName(BuiltinNameStr);\n";
   OS << "  StringRef TargetPrefix(TargetPrefixStr);\n\n";
 
   // Note: this could emit significantly better code if we cared.
@@ -721,7 +793,7 @@ void IntrinsicEmitter::EmitIntrinsicToBuiltinMap(
     OS << "                              std::end(" << I->first << "Names),\n";
     OS << "                              BuiltinNameStr);\n";
     OS << "    if (I != std::end(" << I->first << "Names) &&\n";
-    OS << "        strcmp(I->getName(), BuiltinNameStr) == 0)\n";
+    OS << "        I->getName() == BuiltinNameStr)\n";
     OS << "      return I->IntrinID;\n";
     OS << "  }\n";
   }

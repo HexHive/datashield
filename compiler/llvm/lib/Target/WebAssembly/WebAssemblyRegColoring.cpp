@@ -29,17 +29,13 @@ using namespace llvm;
 
 #define DEBUG_TYPE "wasm-reg-coloring"
 
-static cl::opt<bool>
-    DisableRegColoring("disable-wasm-reg-coloring", cl::Hidden, cl::init(false),
-                       cl::desc("Disable WebAssembly register coloring"));
-
 namespace {
 class WebAssemblyRegColoring final : public MachineFunctionPass {
 public:
   static char ID; // Pass identification, replacement for typeid
   WebAssemblyRegColoring() : MachineFunctionPass(ID) {}
 
-  const char *getPassName() const override {
+  StringRef getPassName() const override {
     return "WebAssembly Register Coloring";
   }
 
@@ -70,7 +66,7 @@ static float computeWeight(const MachineRegisterInfo *MRI,
   float weight = 0.0f;
   for (MachineOperand &MO : MRI->reg_nodbg_operands(VReg))
     weight += LiveIntervals::getSpillWeight(MO.isDef(), MO.isUse(), MBFI,
-                                            MO.getParent());
+                                            *MO.getParent());
   return weight;
 }
 
@@ -79,9 +75,6 @@ bool WebAssemblyRegColoring::runOnMachineFunction(MachineFunction &MF) {
     dbgs() << "********** Register Coloring **********\n"
            << "********** Function: " << MF.getName() << '\n';
   });
-
-  if (DisableRegColoring)
-    return false;
 
   // If there are calls to setjmp or sigsetjmp, don't perform coloring. Virtual
   // registers could be modified before the longjmp is executed, resulting in
@@ -106,7 +99,7 @@ bool WebAssemblyRegColoring::runOnMachineFunction(MachineFunction &MF) {
     unsigned VReg = TargetRegisterInfo::index2VirtReg(i);
     if (MFI.isVRegStackified(VReg))
       continue;
-    // Skip unused registers, which can use $discard.
+    // Skip unused registers, which can use $drop.
     if (MRI->use_empty(VReg))
       continue;
 

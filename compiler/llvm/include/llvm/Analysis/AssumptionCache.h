@@ -22,15 +22,11 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/ValueHandle.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include <memory>
 
 namespace llvm {
-
-// FIXME: Replace this brittle forward declaration with the include of the new
-// PassManager.h when doing so doesn't break the PassManagerBuilder.
-template <typename IRUnitT> class AnalysisManager;
-class PreservedAnalyses;
 
 /// \brief A cache of @llvm.assume calls within a function.
 ///
@@ -50,6 +46,33 @@ class AssumptionCache {
   /// intrinsic.
   SmallVector<WeakVH, 4> AssumeHandles;
 
+  class AffectedValueCallbackVH final : public CallbackVH {
+    AssumptionCache *AC;
+    void deleted() override;
+    void allUsesReplacedWith(Value *) override;
+
+  public:
+    using DMI = DenseMapInfo<Value *>;
+
+    AffectedValueCallbackVH(Value *V, AssumptionCache *AC = nullptr)
+        : CallbackVH(V), AC(AC) {}
+  };
+
+  friend AffectedValueCallbackVH;
+
+  /// \brief A map of values about which an assumption might be providing
+  /// information to the relevant set of assumptions.
+  using AffectedValuesMap =
+    DenseMap<AffectedValueCallbackVH, SmallVector<WeakVH, 1>,
+             AffectedValueCallbackVH::DMI>;
+  AffectedValuesMap AffectedValues;
+
+  /// Get the vector of assumptions which affect a value from the cache.
+  SmallVector<WeakVH, 1> &getOrInsertAffectedValues(Value *V);
+
+  /// Copy affected values in the cache for OV to be affected values for NV.
+  void copyAffectedValuesInCache(Value *OV, Value *NV);
+
   /// \brief Flag tracking whether we have scanned the function yet.
   ///
   /// We want to be as lazy about this as possible, and so we scan the function
@@ -64,17 +87,29 @@ public:
   /// its instructions.
   AssumptionCache(Function &F) : F(F), Scanned(false) {}
 
+  /// This cache is designed to be self-updating and so it should never be
+  /// invalidated.
+  bool invalidate(Function &, const PreservedAnalyses &,
+                  FunctionAnalysisManager::Invalidator &) {
+    return false;
+  }
+
   /// \brief Add an @llvm.assume intrinsic to this function's cache.
   ///
   /// The call passed in must be an instruction within this function and must
   /// not already be in the cache.
   void registerAssumption(CallInst *CI);
 
+  /// \brief Update the cache of values being affected by this assumption (i.e.
+  /// the values about which this assumption provides information).
+  void updateAffectedValues(CallInst *CI);
+
   /// \brief Clear the cache of @llvm.assume intrinsics for a function.
   ///
   /// It will be re-scanned the next time it is requested.
   void clear() {
     AssumeHandles.clear();
+    AffectedValues.clear();
     Scanned = false;
   }
 
@@ -91,42 +126,43 @@ public:
       scanFunction();
     return AssumeHandles;
   }
+
+  /// \brief Access the list of assumptions which affect this value.
+  MutableArrayRef<WeakVH> assumptionsFor(const Value *V) {
+    if (!Scanned)
+      scanFunction();
+
+    auto AVI = AffectedValues.find_as(const_cast<Value *>(V));
+    if (AVI == AffectedValues.end())
+      return MutableArrayRef<WeakVH>();
+
+    return AVI->second;
+  }
 };
 
 /// \brief A function analysis which provides an \c AssumptionCache.
 ///
 /// This analysis is intended for use with the new pass manager and will vend
 /// assumption caches for a given function.
-class AssumptionAnalysis {
-  static char PassID;
+class AssumptionAnalysis : public AnalysisInfoMixin<AssumptionAnalysis> {
+  friend AnalysisInfoMixin<AssumptionAnalysis>;
+  static AnalysisKey Key;
 
 public:
   typedef AssumptionCache Result;
 
-  /// \brief Opaque, unique identifier for this analysis pass.
-  static void *ID() { return (void *)&PassID; }
-
-  /// \brief Provide a name for the analysis for debugging and logging.
-  static StringRef name() { return "AssumptionAnalysis"; }
-
-  AssumptionAnalysis() {}
-  AssumptionAnalysis(const AssumptionAnalysis &Arg) {}
-  AssumptionAnalysis(AssumptionAnalysis &&Arg) {}
-  AssumptionAnalysis &operator=(const AssumptionAnalysis &RHS) { return *this; }
-  AssumptionAnalysis &operator=(AssumptionAnalysis &&RHS) { return *this; }
-
-  AssumptionCache run(Function &F) { return AssumptionCache(F); }
+  AssumptionCache run(Function &F, FunctionAnalysisManager &) {
+    return AssumptionCache(F);
+  }
 };
 
 /// \brief Printer pass for the \c AssumptionAnalysis results.
-class AssumptionPrinterPass {
+class AssumptionPrinterPass : public PassInfoMixin<AssumptionPrinterPass> {
   raw_ostream &OS;
 
 public:
   explicit AssumptionPrinterPass(raw_ostream &OS) : OS(OS) {}
-  PreservedAnalyses run(Function &F, AnalysisManager<Function> *AM);
-
-  static StringRef name() { return "AssumptionPrinterPass"; }
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 
 /// \brief An immutable pass that tracks lazily created \c AssumptionCache

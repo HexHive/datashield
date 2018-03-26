@@ -10,18 +10,25 @@ add_llvm_library(LLVMScalarOpts
   EarlyCSE.cpp
   FlattenCFGPass.cpp
   Float2Int.cpp
+  GuardWidening.cpp
   GVN.cpp
+  GVNHoist.cpp
+  IVUsersPrinter.cpp
   InductiveRangeCheckElimination.cpp
   IndVarSimplify.cpp
   JumpThreading.cpp
   LICM.cpp
+  LoopAccessAnalysisPrinter.cpp
+  LoopSink.cpp
   LoadCombine.cpp
   LoopDeletion.cpp
+  LoopDataPrefetch.cpp
   LoopDistribute.cpp
   LoopIdiomRecognize.cpp
   LoopInstSimplify.cpp
   LoopInterchange.cpp
   LoopLoadElimination.cpp
+  LoopPassManager.cpp
   LoopRerollPass.cpp
   LoopRotation.cpp
   LoopSimplifyCFG.cpp
@@ -31,9 +38,11 @@ add_llvm_library(LLVMScalarOpts
   LoopVersioningLICM.cpp
   LowerAtomic.cpp
   LowerExpectIntrinsic.cpp
+  LowerGuardIntrinsic.cpp
   MemCpyOptimizer.cpp
   MergedLoadStoreMotion.cpp
   NaryReassociate.cpp
+  NewGVN.cpp
   PartiallyInlineLibCalls.cpp
   PlaceSafepoints.cpp
   Reassociate.cpp
@@ -42,7 +51,6 @@ add_llvm_library(LLVMScalarOpts
   SCCP.cpp
   SROA.cpp
   Scalar.cpp
-  ScalarReplAggregates.cpp
   Scalarizer.cpp
   SeparateConstOffsetFromGEP.cpp
   SimplifyCFGPass.cpp
@@ -55,6 +63,7 @@ add_llvm_library(LLVMScalarOpts
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/Scalar
-  )
 
-add_dependencies(LLVMScalarOpts intrinsics_gen)
+  DEPENDS
+  intrinsics_gen
+  )

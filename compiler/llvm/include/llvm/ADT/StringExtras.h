@@ -19,6 +19,7 @@
 #include <iterator>
 
 namespace llvm {
+class raw_ostream;
 template<typename T> class SmallVectorImpl;
 
 /// hexdigit - Return the hexadecimal character for the
@@ -57,6 +58,22 @@ static inline std::string utohexstr(uint64_t X, bool LowerCase = false) {
   }
 
   return std::string(BufPtr, std::end(Buffer));
+}
+
+/// Convert buffer \p Input to its hexadecimal representation.
+/// The returned string is double the size of \p Input.
+static inline std::string toHex(StringRef Input) {
+  static const char *const LUT = "0123456789ABCDEF";
+  size_t Length = Input.size();
+
+  std::string Output;
+  Output.reserve(2 * Length);
+  for (size_t i = 0; i < Length; ++i) {
+    const unsigned char c = Input[i];
+    Output.push_back(LUT[c >> 4]);
+    Output.push_back(LUT[c & 15]);
+  }
+  return Output;
 }
 
 static inline std::string utostr(uint64_t X, bool isNeg = false) {
@@ -134,6 +151,12 @@ static inline StringRef getOrdinalSuffix(unsigned Val) {
   }
 }
 
+/// PrintEscapedString - Print each character of the specified string, escaping
+/// it if it is not printable or if it is an escape char.
+void PrintEscapedString(StringRef Name, raw_ostream &Out);
+
+namespace detail {
+
 template <typename IteratorT>
 inline std::string join_impl(IteratorT Begin, IteratorT End,
                              StringRef Separator, std::input_iterator_tag) {
@@ -168,12 +191,64 @@ inline std::string join_impl(IteratorT Begin, IteratorT End,
   return S;
 }
 
+template <typename Sep>
+inline void join_items_impl(std::string &Result, Sep Separator) {}
+
+template <typename Sep, typename Arg>
+inline void join_items_impl(std::string &Result, Sep Separator,
+                            const Arg &Item) {
+  Result += Item;
+}
+
+template <typename Sep, typename Arg1, typename... Args>
+inline void join_items_impl(std::string &Result, Sep Separator, const Arg1 &A1,
+                            Args &&... Items) {
+  Result += A1;
+  Result += Separator;
+  join_items_impl(Result, Separator, std::forward<Args>(Items)...);
+}
+
+inline size_t join_one_item_size(char C) { return 1; }
+inline size_t join_one_item_size(const char *S) { return S ? ::strlen(S) : 0; }
+
+template <typename T> inline size_t join_one_item_size(const T &Str) {
+  return Str.size();
+}
+
+inline size_t join_items_size() { return 0; }
+
+template <typename A1> inline size_t join_items_size(const A1 &A) {
+  return join_one_item_size(A);
+}
+template <typename A1, typename... Args>
+inline size_t join_items_size(const A1 &A, Args &&... Items) {
+  return join_one_item_size(A) + join_items_size(std::forward<Args>(Items)...);
+}
+}
+
 /// Joins the strings in the range [Begin, End), adding Separator between
 /// the elements.
 template <typename IteratorT>
 inline std::string join(IteratorT Begin, IteratorT End, StringRef Separator) {
   typedef typename std::iterator_traits<IteratorT>::iterator_category tag;
-  return join_impl(Begin, End, Separator, tag());
+  return detail::join_impl(Begin, End, Separator, tag());
+}
+
+/// Joins the strings in the parameter pack \p Items, adding \p Separator
+/// between the elements.  All arguments must be implicitly convertible to
+/// std::string, or there should be an overload of std::string::operator+=()
+/// that accepts the argument explicitly.
+template <typename Sep, typename... Args>
+inline std::string join_items(Sep Separator, Args &&... Items) {
+  std::string Result;
+  if (sizeof...(Items) == 0)
+    return Result;
+
+  size_t NS = detail::join_one_item_size(Separator);
+  size_t NI = detail::join_items_size(std::forward<Args>(Items)...);
+  Result.reserve(NI + (sizeof...(Items) - 1) * NS + 1);
+  detail::join_items_impl(Result, Separator, std::forward<Args>(Items)...);
+  return Result;
 }
 
 } // End llvm namespace

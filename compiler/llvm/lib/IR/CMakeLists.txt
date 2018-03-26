@@ -37,12 +37,14 @@ add_llvm_library(LLVMCore
   Mangler.cpp
   Metadata.cpp
   Module.cpp
+  ModuleSummaryIndex.cpp
   Operator.cpp
+  OptBisect.cpp
   Pass.cpp
   PassManager.cpp
   PassRegistry.cpp
+  ProfileSummary.cpp
   Statepoint.cpp
-  FunctionInfo.cpp
   Type.cpp
   TypeFinder.cpp
   Use.cpp
@@ -54,6 +56,7 @@ add_llvm_library(LLVMCore
 
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/IR
-  )
 
-add_dependencies(LLVMCore intrinsics_gen)
+  DEPENDS
+  intrinsics_gen
+  )

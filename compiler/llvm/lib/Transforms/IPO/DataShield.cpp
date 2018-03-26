@@ -521,8 +521,7 @@ bool isWhiteListed(Function& F) {
 
 Function* duplicateFunction(Module& M, Function& oldF, StringRef newName) {
   ValueToValueMapTy vMap;
-  // fix me: change true to false in CloneFunction once they fix my bug
-  auto newF = CloneFunction(&oldF, vMap, false);
+  auto newF = CloneFunction(&oldF, vMap);
   newF->setName(newName);
   M.getFunctionList().push_back(newF);
   return newF;
@@ -1246,7 +1245,7 @@ class MemoryRegioner {
             for (unsigned i = 0; i < call->getNumArgOperands() + 1; ++i) {
               if (call->paramHasAttr(i, Attribute::ByVal) && i == a.getArgNo() + 1) {
                 //llvm_unreachable("we found it!");
-                call->removeAttribute(i, Attribute::get(M.getContext(), Attribute::ByVal));
+                call->removeAttribute(i, Attribute::ByVal);
               }
             }
           }
@@ -1514,8 +1513,11 @@ class Sandboxer {
     auto main = M.getFunction("main");
     if (main == nullptr) { llvm_unreachable("should be able to find main function"); }
     auto args = main->arg_begin();
+    if (args == main->arg_end()) { llvm_unreachable("main has no arguments.  unsupported."); }
     auto argc = &*args;
-    auto argv = &*(++args);
+    args++;
+    if (args == main->arg_end()) { llvm_unreachable("main has only 1 argument.  unsupported."); }
+    auto argv = &*args;
     if (sensitiveSet.count(argv)) {
       IRBuilder<> IRB(&*main->getEntryBlock().getFirstInsertionPt());
       auto argv_repl = IRB.CreateCall(safeCopyArgv, {argc, argv}, "argv_repl");
