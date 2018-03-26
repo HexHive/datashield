@@ -43,6 +43,8 @@ void CodeGenPGO::setFuncName(StringRef Name,
 
 void CodeGenPGO::setFuncName(llvm::Function *Fn) {
   setFuncName(Fn->getName(), Fn->getLinkage());
+  // Create PGOFuncName meta data.
+  llvm::createPGOFuncNameMetadata(*Fn, FuncName);
 }
 
 namespace {
@@ -409,7 +411,8 @@ struct ComputeRegionCounts : public ConstStmtVisitor<ComputeRegionCounts> {
     RecordStmtCount(S);
     Visit(S->getLoopVarStmt());
     Visit(S->getRangeStmt());
-    Visit(S->getBeginEndStmt());
+    Visit(S->getBeginStmt());
+    Visit(S->getEndStmt());
 
     uint64_t ParentCount = CurrentCount;
     BreakContinueStack.push_back(BreakContinue());
@@ -455,6 +458,8 @@ struct ComputeRegionCounts : public ConstStmtVisitor<ComputeRegionCounts> {
 
   void VisitSwitchStmt(const SwitchStmt *S) {
     RecordStmtCount(S);
+    if (S->getInit())
+      Visit(S->getInit());
     Visit(S->getCond());
     CurrentCount = 0;
     BreakContinueStack.push_back(BreakContinue());
@@ -485,6 +490,8 @@ struct ComputeRegionCounts : public ConstStmtVisitor<ComputeRegionCounts> {
   void VisitIfStmt(const IfStmt *S) {
     RecordStmtCount(S);
     uint64_t ParentCount = CurrentCount;
+    if (S->getInit())
+      Visit(S->getInit());
     Visit(S->getCond());
 
     // Counter tracks the "then" part of an if statement. The count for
@@ -656,12 +663,18 @@ void CodeGenPGO::mapRegionCounters(const Decl *D) {
   FunctionHash = Walker.Hash.finalize();
 }
 
-void CodeGenPGO::emitCounterRegionMapping(const Decl *D) {
+bool CodeGenPGO::skipRegionMappingForDecl(const Decl *D) {
   if (SkipCoverageMapping)
-    return;
-  // Don't map the functions inside the system headers
+    return true;
+
+  // Don't map the functions in system headers.
+  const auto &SM = CGM.getContext().getSourceManager();
   auto Loc = D->getBody()->getLocStart();
-  if (CGM.getContext().getSourceManager().isInSystemHeader(Loc))
+  return SM.isInSystemHeader(Loc);
+}
+
+void CodeGenPGO::emitCounterRegionMapping(const Decl *D) {
+  if (skipRegionMappingForDecl(D))
     return;
 
   std::string CoverageMapping;
@@ -682,11 +695,7 @@ void CodeGenPGO::emitCounterRegionMapping(const Decl *D) {
 void
 CodeGenPGO::emitEmptyCounterMapping(const Decl *D, StringRef Name,
                                     llvm::GlobalValue::LinkageTypes Linkage) {
-  if (SkipCoverageMapping)
-    return;
-  // Don't map the functions inside the system headers
-  auto Loc = D->getBody()->getLocStart();
-  if (CGM.getContext().getSourceManager().isInSystemHeader(Loc))
+  if (skipRegionMappingForDecl(D))
     return;
 
   std::string CoverageMapping;
@@ -754,12 +763,15 @@ void CodeGenPGO::valueProfile(CGBuilderTy &Builder, uint32_t ValueKind,
   if (!ValuePtr || !ValueSite || !Builder.GetInsertBlock())
     return;
 
+  if (isa<llvm::Constant>(ValuePtr))
+    return;
+
   bool InstrumentValueSites = CGM.getCodeGenOpts().hasProfileClangInstr();
   if (InstrumentValueSites && RegionCounterMap) {
-    llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-    auto *I8PtrTy = llvm::Type::getInt8PtrTy(Ctx);
+    auto BuilderInsertPoint = Builder.saveIP();
+    Builder.SetInsertPoint(ValueSite);
     llvm::Value *Args[5] = {
-        llvm::ConstantExpr::getBitCast(FuncNameVar, I8PtrTy),
+        llvm::ConstantExpr::getBitCast(FuncNameVar, Builder.getInt8PtrTy()),
         Builder.getInt64(FunctionHash),
         Builder.CreatePtrToInt(ValuePtr, Builder.getInt64Ty()),
         Builder.getInt32(ValueKind),
@@ -767,6 +779,7 @@ void CodeGenPGO::valueProfile(CGBuilderTy &Builder, uint32_t ValueKind,
     };
     Builder.CreateCall(
         CGM.getIntrinsic(llvm::Intrinsic::instrprof_value_profile), Args);
+    Builder.restoreIP(BuilderInsertPoint);
     return;
   }
 
@@ -793,20 +806,21 @@ void CodeGenPGO::loadRegionCounts(llvm::IndexedInstrProfReader *PGOReader,
                                   bool IsInMainFile) {
   CGM.getPGOStats().addVisited(IsInMainFile);
   RegionCounts.clear();
-  llvm::ErrorOr<llvm::InstrProfRecord> RecordErrorOr =
+  llvm::Expected<llvm::InstrProfRecord> RecordExpected =
       PGOReader->getInstrProfRecord(FuncName, FunctionHash);
-  if (std::error_code EC = RecordErrorOr.getError()) {
-    if (EC == llvm::instrprof_error::unknown_function)
+  if (auto E = RecordExpected.takeError()) {
+    auto IPE = llvm::InstrProfError::take(std::move(E));
+    if (IPE == llvm::instrprof_error::unknown_function)
       CGM.getPGOStats().addMissing(IsInMainFile);
-    else if (EC == llvm::instrprof_error::hash_mismatch)
+    else if (IPE == llvm::instrprof_error::hash_mismatch)
       CGM.getPGOStats().addMismatched(IsInMainFile);
-    else if (EC == llvm::instrprof_error::malformed)
+    else if (IPE == llvm::instrprof_error::malformed)
       // TODO: Consider a more specific warning for this case.
       CGM.getPGOStats().addMismatched(IsInMainFile);
     return;
   }
   ProfRecord =
-      llvm::make_unique<llvm::InstrProfRecord>(std::move(RecordErrorOr.get()));
+      llvm::make_unique<llvm::InstrProfRecord>(std::move(RecordExpected.get()));
   RegionCounts = ProfRecord->Counts;
 }
 

@@ -83,6 +83,13 @@ CodeGenFunction::EmitCUDADevicePrintfCallExpr(const CallExpr *E,
                E->arguments(), E->getDirectCallee(),
                /* ParamsToSkip = */ 0);
 
+  // We don't know how to emit non-scalar varargs.
+  if (std::any_of(Args.begin() + 1, Args.end(),
+                  [](const CallArg &A) { return !A.RV.isScalar(); })) {
+    CGM.ErrorUnsupported(E, "non-scalar arg to printf");
+    return RValue::get(llvm::ConstantInt::get(IntTy, 0));
+  }
+
   // Construct and fill the args buffer that we'll pass to vprintf.
   llvm::Value *BufferPtr;
   if (Args.size() <= 1) {
@@ -92,6 +99,12 @@ CodeGenFunction::EmitCUDADevicePrintfCallExpr(const CallExpr *E,
     llvm::SmallVector<llvm::Type *, 8> ArgTypes;
     for (unsigned I = 1, NumArgs = Args.size(); I < NumArgs; ++I)
       ArgTypes.push_back(Args[I].RV.getScalarVal()->getType());
+
+    // Using llvm::StructType is correct only because printf doesn't accept
+    // aggregates.  If we had to handle aggregates here, we'd have to manually
+    // compute the offsets within the alloca -- we wouldn't be able to assume
+    // that the alignment of the llvm type was the same as the alignment of the
+    // clang type.
     llvm::Type *AllocaTy = llvm::StructType::create(ArgTypes, "printf_args");
     llvm::Value *Alloca = CreateTempAlloca(AllocaTy);
 

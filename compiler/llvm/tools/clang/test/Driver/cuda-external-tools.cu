@@ -1,4 +1,5 @@
-// Tests that ptxas and fatbinary are correctly during CUDA compilation.
+// Tests that ptxas and fatbinary are invoked correctly during CUDA
+// compilation.
 //
 // REQUIRES: clang-driver
 // REQUIRES: x86-registered-target
@@ -17,6 +18,15 @@
 // RUN: | FileCheck -check-prefix ARCH64 -check-prefix SM20 -check-prefix OPT3 %s
 // RUN: %clang -### -target x86_64-linux-gnu -Ofast -c %s 2>&1 \
 // RUN: | FileCheck -check-prefix ARCH64 -check-prefix SM20 -check-prefix OPT3 %s
+
+// With debugging enabled, ptxas should be run with with no ptxas optimizations.
+// RUN: %clang -### -target x86_64-linux-gnu --cuda-noopt-device-debug -O2 -c %s 2>&1 \
+// RUN: | FileCheck -check-prefix ARCH64 -check-prefix SM20 -check-prefix DBG %s
+
+// --no-cuda-noopt-device-debug overrides --cuda-noopt-device-debug.
+// RUN: %clang -### -target x86_64-linux-gnu --cuda-noopt-debug \
+// RUN:   --no-cuda-noopt-debug -O2 -c %s 2>&1 \
+// RUN: | FileCheck -check-prefix ARCH64 -check-prefix SM20 -check-prefix OPT2 %s
 
 // Regular compile without -O.  This should result in us passing -O0 to ptxas.
 // RUN: %clang -### -target x86_64-linux-gnu -c %s 2>&1 \
@@ -47,6 +57,14 @@
 // RUN: | FileCheck -check-prefix SM20 -check-prefix PTXAS-EXTRA \
 // RUN:   -check-prefix FATBINARY-EXTRA %s
 
+// MacOS spot-checks
+// RUN: %clang -### -target x86_64-apple-macosx -O0 -c %s 2>&1 \
+// RUN: | FileCheck -check-prefix ARCH64 -check-prefix SM20 -check-prefix OPT0 %s
+// RUN: %clang -### -target x86_64-apple-macosx --cuda-gpu-arch=sm_35 -c %s 2>&1 \
+// RUN: | FileCheck -check-prefix ARCH64 -check-prefix SM35 %s
+// RUN: %clang -### -target x86_32-apple-macosx -c %s 2>&1 \
+// RUN: | FileCheck -check-prefix ARCH32 -check-prefix SM20 %s
+
 // Match clang job that produces PTX assembly.
 // CHECK: "-cc1" "-triple" "nvptx64-nvidia-cuda"
 // SM20: "-target-cpu" "sm_20"
@@ -59,9 +77,14 @@
 // ARCH64: "-m64"
 // ARCH32: "-m32"
 // OPT0: "-O0"
+// OPT0-NOT: "-g"
 // OPT1: "-O1"
+// OPT1-NOT: "-g"
 // OPT2: "-O2"
+// OPT2-NOT: "-g"
 // OPT3: "-O3"
+// OPT3-NOT: "-g"
+// DBG: "-g" "--dont-merge-basicblocks" "--return-at-end"
 // SM20: "--gpu-name" "sm_20"
 // SM35: "--gpu-name" "sm_35"
 // SM20: "--output-file" "[[CUBINFILE:[^"]*]]"

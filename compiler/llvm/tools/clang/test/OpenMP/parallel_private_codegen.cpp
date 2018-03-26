@@ -4,7 +4,6 @@
 // RUN: %clang_cc1 -verify -fopenmp -x c++ -std=c++11 -DLAMBDA -triple %itanium_abi_triple -emit-llvm %s -o - | FileCheck -check-prefix=LAMBDA %s
 // RUN: %clang_cc1 -verify -fopenmp -x c++ -fblocks -DBLOCKS -triple %itanium_abi_triple -emit-llvm %s -o - | FileCheck -check-prefix=BLOCKS %s
 // expected-no-diagnostics
-// REQUIRES: x86-registered-target
 #ifndef HEADER
 #define HEADER
 template <class T>
@@ -99,8 +98,9 @@ int main() {
 #ifdef LAMBDA
   // LAMBDA: [[G:@.+]] = global i{{[0-9]+}} 1212,
   // LAMBDA-LABEL: @main
-  // LAMBDA: call{{.*}} void
-  // LAMBDA: call{{.*}} void [[OUTER_LAMBDA:@[^(]+]](
+  // LAMBDA: alloca [[SS_TY]],
+  // LAMBDA: alloca [[CAP_TY:%.+]],
+  // LAMBDA: call{{.*}} void [[OUTER_LAMBDA:@[^(]+]]([[CAP_TY]]*
   [&]() {
   // LAMBDA: define{{.*}} internal{{.*}} void [[OUTER_LAMBDA]](
   // LAMBDA-NOT: = getelementptr inbounds %{{.+}},
@@ -286,7 +286,7 @@ int main() {
 // CHECK: call void [[S_INT_TY_DESTR:@.+]]([[S_INT_TY]]*
 // CHECK: ret
 //
-// CHECK: define {{.+}} @{{.+}}([[SS_TY]]* %
+// CHECK: define {{.+}} @{{.+}}([[SS_TY]]*
 // CHECK: store i{{[0-9]+}} 0, i{{[0-9]+}}* %
 // CHECK: store i8
 // CHECK: call void (%{{.+}}*, i{{[0-9]+}}, void (i{{[0-9]+}}*, i{{[0-9]+}}*, ...)*, ...) @__kmpc_fork_call(%{{.+}}* @{{.+}}, i{{[0-9]+}} 1, void (i{{[0-9]+}}*, i{{[0-9]+}}*, ...)* bitcast (void (i{{[0-9]+}}*, i{{[0-9]+}}*, [[SS_TY]]*)* [[SS_MICROTASK:@.+]] to void

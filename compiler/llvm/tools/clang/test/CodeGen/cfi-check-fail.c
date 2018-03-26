@@ -1,4 +1,5 @@
-// RUN: %clang_cc1 -triple x86_64-unknown-linux -O0 -fsanitize=cfi-icall -fsanitize-cfi-cross-dso \
+// RUN: %clang_cc1 -triple x86_64-unknown-linux -O0 -fsanitize-cfi-cross-dso \
+// RUN:     -fsanitize=cfi-icall,cfi-nvcall,cfi-vcall,cfi-unrelated-cast,cfi-derived-cast \
 // RUN:     -fsanitize-trap=cfi-icall,cfi-nvcall -fsanitize-recover=cfi-vcall,cfi-unrelated-cast \
 // RUN:     -emit-llvm -o - %s | FileCheck %s
 
@@ -6,7 +7,7 @@ void caller(void (*f)()) {
   f();
 }
 
-// CHECK: define weak_odr hidden void @__cfi_check_fail(i8*, i8*) {
+// CHECK: define weak_odr hidden void @__cfi_check_fail(i8*, i8*)
 // CHECK: store i8* %0, i8** %[[ALLOCA0:.*]], align 8
 // CHECK: store i8* %1, i8** %[[ALLOCA1:.*]], align 8
 // CHECK: %[[DATA:.*]] = load i8*, i8** %[[ALLOCA0]], align 8
@@ -22,7 +23,7 @@ void caller(void (*f)()) {
 // CHECK:   %[[A:.*]] = bitcast i8* %[[DATA]] to { i8, { i8*, i32, i32 }, i8* }*
 // CHECK:   %[[KINDPTR:.*]] = getelementptr {{.*}} %[[A]], i32 0, i32 0
 // CHECK:   %[[KIND:.*]] = load i8, i8* %[[KINDPTR]], align 4
-// CHECK:   %[[VTVALID0:.*]] = call i1 @llvm.bitset.test(i8* %[[ADDR]], metadata !"all-vtables")
+// CHECK:   %[[VTVALID0:.*]] = call i1 @llvm.type.test(i8* %[[ADDR]], metadata !"all-vtables")
 // CHECK:   %[[VTVALID:.*]] = zext i1 %[[VTVALID0]] to i64
 // CHECK:   %[[NOT_0:.*]] = icmp ne i8 %[[KIND]], 0
 // CHECK:   br i1 %[[NOT_0]], label %[[CONT1:.*]], label %[[HANDLE0:.*]], !prof

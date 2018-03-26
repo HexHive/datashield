@@ -16,7 +16,6 @@
 #include "clang/AST/RecordLayout.h"
 #include "llvm/ADT/SetVector.h"
 #include <algorithm>
-#include <set>
 
 using namespace clang;
 
@@ -89,7 +88,7 @@ bool CXXRecordDecl::isDerivedFrom(const CXXRecordDecl *Base,
   const CXXRecordDecl *BaseDecl = Base->getCanonicalDecl();
   // FIXME: Capturing 'this' is a workaround for name lookup bugs in GCC 4.7.
   return lookupInBases(
-      [this, BaseDecl](const CXXBaseSpecifier *Specifier, CXXBasePath &Path) {
+      [BaseDecl](const CXXBaseSpecifier *Specifier, CXXBasePath &Path) {
         return FindBaseClass(Specifier, Path, BaseDecl);
       },
       Paths);
@@ -110,7 +109,7 @@ bool CXXRecordDecl::isVirtuallyDerivedFrom(const CXXRecordDecl *Base) const {
   const CXXRecordDecl *BaseDecl = Base->getCanonicalDecl();
   // FIXME: Capturing 'this' is a workaround for name lookup bugs in GCC 4.7.
   return lookupInBases(
-      [this, BaseDecl](const CXXBaseSpecifier *Specifier, CXXBasePath &Path) {
+      [BaseDecl](const CXXBaseSpecifier *Specifier, CXXBasePath &Path) {
         return FindVirtualBaseClass(Specifier, Path, BaseDecl);
       },
       Paths);
@@ -402,6 +401,21 @@ bool CXXRecordDecl::FindOrdinaryMember(const CXXBaseSpecifier *Specifier,
       return true;
   }
   
+  return false;
+}
+
+bool CXXRecordDecl::FindOMPReductionMember(const CXXBaseSpecifier *Specifier,
+                                           CXXBasePath &Path,
+                                           DeclarationName Name) {
+  RecordDecl *BaseRecord =
+      Specifier->getType()->castAs<RecordType>()->getDecl();
+
+  for (Path.Decls = BaseRecord->lookup(Name); !Path.Decls.empty();
+       Path.Decls = Path.Decls.slice(1)) {
+    if (Path.Decls.front()->isInIdentifierNamespace(IDNS_OMPReduction))
+      return true;
+  }
+
   return false;
 }
 

@@ -293,3 +293,57 @@ int PR26105() {
 }
 // CHECK-DAG: @"\01??R<lambda_0>@?0??PR26105@@YAHXZ@QBE@H@Z"
 // CHECK-DAG: @"\01??R<lambda_1>@?0???R<lambda_0>@?0??PR26105@@YAHXZ@QBE@H@Z@QBE@H@Z"
+
+int __unaligned * unaligned_foo1() { return 0; }
+int __unaligned * __unaligned * unaligned_foo2() { return 0; }
+__unaligned int unaligned_foo3() { return 0; }
+void unaligned_foo4(int __unaligned *p1) {}
+void unaligned_foo5(int __unaligned * __restrict p1) {}
+template <typename T> T unaligned_foo6(T t) { return t; }
+void unaligned_foo7() { unaligned_foo6<int *>(0); unaligned_foo6<int __unaligned *>(0); }
+
+// CHECK-DAG: @"\01?unaligned_foo1@@YAPFAHXZ"
+// CHECK-DAG: @"\01?unaligned_foo2@@YAPFAPFAHXZ"
+// CHECK-DAG: @"\01?unaligned_foo3@@YAHXZ"
+// CHECK-DAG: @"\01?unaligned_foo4@@YAXPFAH@Z"
+// CHECK-DAG: @"\01?unaligned_foo5@@YAXPIFAH@Z"
+// CHECK-DAG: @"\01??$unaligned_foo6@PAH@@YAPAHPAH@Z"
+// CHECK-DAG: @"\01??$unaligned_foo6@PFAH@@YAPFAHPFAH@Z"
+
+// __unaligned qualifier for function types
+struct unaligned_foo8_S {
+    void unaligned_foo8() volatile __unaligned;
+};
+void unaligned_foo8_S::unaligned_foo8() volatile __unaligned {}
+
+// CHECK-DAG: @"\01?unaligned_foo8@unaligned_foo8_S@@QFCEXXZ"
+
+namespace PR31197 {
+struct A {
+  // CHECK-DAG: define linkonce_odr x86_thiscallcc i32* @"\01??R<lambda_1>@x@A@PR31197@@QBE@XZ"(
+  int *x = []() {
+    static int white;
+    // CHECK-DAG: @"\01?white@?1???R<lambda_1>@x@A@PR31197@@QBE@XZ@4HA"
+    return &white;
+  }();
+  // CHECK-DAG: define linkonce_odr x86_thiscallcc i32* @"\01??R<lambda_1>@y@A@PR31197@@QBE@XZ"(
+  int *y = []() {
+    static int black;
+    // CHECK-DAG: @"\01?black@?1???R<lambda_1>@y@A@PR31197@@QBE@XZ@4HA"
+    return &black;
+  }();
+  using FPtrTy = void(void);
+  static void default_args(FPtrTy x = [] {}, FPtrTy y = [] {}, int z = [] { return 1; }() + [] { return 2; }()) {}
+  // CHECK-DAG: @"\01??R<lambda_1_1>@?0??default_args@A@PR31197@@SAXP6AXXZ0H@Z@QBE@XZ"(
+  // CHECK-DAG: @"\01??R<lambda_1_2>@?0??default_args@A@PR31197@@SAXP6AXXZ0H@Z@QBE@XZ"(
+  // CHECK-DAG: @"\01??R<lambda_2_1>@?0??default_args@A@PR31197@@SAXP6AXXZ0H@Z@QBE@XZ"(
+  // CHECK-DAG: @"\01??R<lambda_3_1>@?0??default_args@A@PR31197@@SAXP6AXXZ0H@Z@QBE@XZ"(
+};
+A a;
+
+int call_it = (A::default_args(), 1);
+}
+
+enum { enumerator };
+void f(decltype(enumerator)) {}
+// CHECK-DAG: define void @"\01?f@@YAXW4<unnamed-enum-enumerator>@@@Z"(

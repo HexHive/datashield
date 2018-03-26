@@ -35,7 +35,7 @@
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VAESENC instruction.
+/// This intrinsic corresponds to the <c> VAESENC </c> instruction.
 ///
 /// \param __V
 ///    A 128-bit integer vector containing the state value.
@@ -45,7 +45,7 @@
 static __inline__ __m128i __DEFAULT_FN_ATTRS
 _mm_aesenc_si128(__m128i __V, __m128i __R)
 {
-  return (__m128i)__builtin_ia32_aesenc128(__V, __R);
+  return (__m128i)__builtin_ia32_aesenc128((__v2di)__V, (__v2di)__R);
 }
 
 /// \brief Performs the final round of AES encryption using the Equivalent
@@ -55,7 +55,7 @@ _mm_aesenc_si128(__m128i __V, __m128i __R)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VAESENCLAST instruction.
+/// This intrinsic corresponds to the <c> VAESENCLAST </c> instruction.
 ///
 /// \param __V
 ///    A 128-bit integer vector containing the state value.
@@ -65,7 +65,7 @@ _mm_aesenc_si128(__m128i __V, __m128i __R)
 static __inline__ __m128i __DEFAULT_FN_ATTRS
 _mm_aesenclast_si128(__m128i __V, __m128i __R)
 {
-  return (__m128i)__builtin_ia32_aesenclast128(__V, __R);
+  return (__m128i)__builtin_ia32_aesenclast128((__v2di)__V, (__v2di)__R);
 }
 
 /// \brief Performs a single round of AES decryption using the Equivalent
@@ -75,7 +75,7 @@ _mm_aesenclast_si128(__m128i __V, __m128i __R)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VAESDEC instruction.
+/// This intrinsic corresponds to the <c> VAESDEC </c> instruction.
 ///
 /// \param __V
 ///    A 128-bit integer vector containing the state value.
@@ -85,7 +85,7 @@ _mm_aesenclast_si128(__m128i __V, __m128i __R)
 static __inline__ __m128i __DEFAULT_FN_ATTRS
 _mm_aesdec_si128(__m128i __V, __m128i __R)
 {
-  return (__m128i)__builtin_ia32_aesdec128(__V, __R);
+  return (__m128i)__builtin_ia32_aesdec128((__v2di)__V, (__v2di)__R);
 }
 
 /// \brief Performs the final round of AES decryption using the Equivalent
@@ -95,7 +95,7 @@ _mm_aesdec_si128(__m128i __V, __m128i __R)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VAESDECLAST instruction.
+/// This intrinsic corresponds to the <c> VAESDECLAST </c> instruction.
 ///
 /// \param __V
 ///    A 128-bit integer vector containing the state value.
@@ -105,7 +105,7 @@ _mm_aesdec_si128(__m128i __V, __m128i __R)
 static __inline__ __m128i __DEFAULT_FN_ATTRS
 _mm_aesdeclast_si128(__m128i __V, __m128i __R)
 {
-  return (__m128i)__builtin_ia32_aesdeclast128(__V, __R);
+  return (__m128i)__builtin_ia32_aesdeclast128((__v2di)__V, (__v2di)__R);
 }
 
 /// \brief Applies the AES InvMixColumns() transformation to an expanded key
@@ -114,7 +114,7 @@ _mm_aesdeclast_si128(__m128i __V, __m128i __R)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VAESIMC instruction.
+/// This intrinsic corresponds to the <c> VAESIMC </c> instruction.
 ///
 /// \param __V
 ///    A 128-bit integer vector containing the expanded key.
@@ -122,12 +122,12 @@ _mm_aesdeclast_si128(__m128i __V, __m128i __R)
 static __inline__ __m128i __DEFAULT_FN_ATTRS
 _mm_aesimc_si128(__m128i __V)
 {
-  return (__m128i)__builtin_ia32_aesimc128(__V);
+  return (__m128i)__builtin_ia32_aesimc128((__v2di)__V);
 }
 
-/// \brief Generates a round key for AES encyption, operating on 128-bit data 
+/// \brief Generates a round key for AES encyption, operating on 128-bit data
 ///    specified in the first source operand and using an 8-bit round constant
-///    specified by the second source operand, and writes the result to the 
+///    specified by the second source operand, and writes the result to the
 ///    destination.
 ///
 /// \headerfile <x86intrin.h>
@@ -136,7 +136,7 @@ _mm_aesimc_si128(__m128i __V)
 /// __m128i _mm_aeskeygenassist_si128(__m128i C, const int R);
 /// \endcode
 ///
-/// This intrinsic corresponds to the \c AESKEYGENASSIST instruction.
+/// This intrinsic corresponds to the <c> AESKEYGENASSIST </c> instruction.
 ///
 /// \param C
 ///    A 128-bit integer vector that is used to generate the AES encryption key.

@@ -31,13 +31,13 @@
   __attribute__((__always_inline__, __nodebug__, __target__("sse3")))
 
 /// \brief Loads data from an unaligned memory location to elements in a 128-bit
-///    vector. If the address of the data is not 16-byte aligned, the 
-///    instruction may read two adjacent aligned blocks of memory to retrieve 
-///    the requested data. 
+///    vector. If the address of the data is not 16-byte aligned, the
+///    instruction may read two adjacent aligned blocks of memory to retrieve
+///    the requested data.
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VLDDQU instruction.
+/// This intrinsic corresponds to the <c> VLDDQU </c> instruction.
 ///
 /// \param __p
 ///    A pointer to a 128-bit integer vector containing integer values.
@@ -53,7 +53,7 @@ _mm_lddqu_si128(__m128i const *__p)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VADDSUBPS instruction.
+/// This intrinsic corresponds to the <c> VADDSUBPS </c> instruction.
 ///
 /// \param __a
 ///    A 128-bit vector of [4 x float] containing the left source operand.
@@ -64,7 +64,7 @@ _mm_lddqu_si128(__m128i const *__p)
 static __inline__ __m128 __DEFAULT_FN_ATTRS
 _mm_addsub_ps(__m128 __a, __m128 __b)
 {
-  return __builtin_ia32_addsubps(__a, __b);
+  return __builtin_ia32_addsubps((__v4sf)__a, (__v4sf)__b);
 }
 
 /// \brief Horizontally adds the adjacent pairs of values contained in two
@@ -72,22 +72,22 @@ _mm_addsub_ps(__m128 __a, __m128 __b)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VHADDPS instruction.
+/// This intrinsic corresponds to the <c> VHADDPS </c> instruction.
 ///
 /// \param __a
-///    A 128-bit vector of [4 x float] containing one of the source operands. 
-///    The horizontal sums of the values are stored in the lower bits of the 
+///    A 128-bit vector of [4 x float] containing one of the source operands.
+///    The horizontal sums of the values are stored in the lower bits of the
 ///    destination.
 /// \param __b
-///    A 128-bit vector of [4 x float] containing one of the source operands. 
-///    The horizontal sums of the values are stored in the upper bits of the 
+///    A 128-bit vector of [4 x float] containing one of the source operands.
+///    The horizontal sums of the values are stored in the upper bits of the
 ///    destination.
-/// \returns A 128-bit vector of [4 x float] containing the horizontal sums of 
+/// \returns A 128-bit vector of [4 x float] containing the horizontal sums of
 ///    both operands.
 static __inline__ __m128 __DEFAULT_FN_ATTRS
 _mm_hadd_ps(__m128 __a, __m128 __b)
 {
-  return __builtin_ia32_haddps(__a, __b);
+  return __builtin_ia32_haddps((__v4sf)__a, (__v4sf)__b);
 }
 
 /// \brief Horizontally subtracts the adjacent pairs of values contained in two
@@ -95,66 +95,65 @@ _mm_hadd_ps(__m128 __a, __m128 __b)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VHSUBPS instruction.
+/// This intrinsic corresponds to the <c> VHSUBPS </c> instruction.
 ///
 /// \param __a
-///    A 128-bit vector of [4 x float] containing one of the source operands. 
-///    The horizontal differences between the values are stored in the lower 
+///    A 128-bit vector of [4 x float] containing one of the source operands.
+///    The horizontal differences between the values are stored in the lower
 ///    bits of the destination.
 /// \param __b
-///    A 128-bit vector of [4 x float] containing one of the source operands. 
-///    The horizontal differences between the values are stored in the upper 
+///    A 128-bit vector of [4 x float] containing one of the source operands.
+///    The horizontal differences between the values are stored in the upper
 ///    bits of the destination.
-/// \returns A 128-bit vector of [4 x float] containing the horizontal 
+/// \returns A 128-bit vector of [4 x float] containing the horizontal
 ///    differences of both operands.
 static __inline__ __m128 __DEFAULT_FN_ATTRS
 _mm_hsub_ps(__m128 __a, __m128 __b)
 {
-  return __builtin_ia32_hsubps(__a, __b);
+  return __builtin_ia32_hsubps((__v4sf)__a, (__v4sf)__b);
 }
 
 /// \brief Moves and duplicates high-order (odd-indexed) values from a 128-bit
 ///    vector of [4 x float] to float values stored in a 128-bit vector of
 ///    [4 x float].
-///    Bits [127:96] of the source are written to bits [127:96] and [95:64] of
-///    the destination.
-///    Bits [63:32] of the source are written to bits [63:32] and [31:0] of the
-///    destination.
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VMOVSHDUP instruction.
+/// This intrinsic corresponds to the <c> VMOVSHDUP </c> instruction.
 ///
 /// \param __a
-///    A 128-bit vector of [4 x float].
+///    A 128-bit vector of [4 x float]. \n
+///    Bits [127:96] of the source are written to bits [127:96] and [95:64] of
+///    the destination. \n
+///    Bits [63:32] of the source are written to bits [63:32] and [31:0] of the
+///    destination.
 /// \returns A 128-bit vector of [4 x float] containing the moved and duplicated
 ///    values.
 static __inline__ __m128 __DEFAULT_FN_ATTRS
 _mm_movehdup_ps(__m128 __a)
 {
-  return __builtin_shufflevector(__a, __a, 1, 1, 3, 3);
+  return __builtin_shufflevector((__v4sf)__a, (__v4sf)__a, 1, 1, 3, 3);
 }
 
-/// \brief Duplicates low-order (even-indexed) values from a 128-bit
-///    vector of [4 x float] to float values stored in a 128-bit vector of
-///    [4 x float].
-///    Bits [95:64] of the source are written to bits [127:96] and [95:64] of
-///    the destination.
-///    Bits [31:0] of the source are written to bits [63:32] and [31:0] of the
-///    destination.
+/// \brief Duplicates low-order (even-indexed) values from a 128-bit vector of
+///    [4 x float] to float values stored in a 128-bit vector of [4 x float].
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VMOVSLDUP instruction.
+/// This intrinsic corresponds to the <c> VMOVSLDUP </c> instruction.
 ///
 /// \param __a
-///    A 128-bit vector of [4 x float].
+///    A 128-bit vector of [4 x float] \n
+///    Bits [95:64] of the source are written to bits [127:96] and [95:64] of
+///    the destination. \n
+///    Bits [31:0] of the source are written to bits [63:32] and [31:0] of the
+///    destination.
 /// \returns A 128-bit vector of [4 x float] containing the moved and duplicated
 ///    values.
 static __inline__ __m128 __DEFAULT_FN_ATTRS
 _mm_moveldup_ps(__m128 __a)
 {
-  return __builtin_shufflevector(__a, __a, 0, 0, 2, 2);
+  return __builtin_shufflevector((__v4sf)__a, (__v4sf)__a, 0, 0, 2, 2);
 }
 
 /// \brief Adds the even-indexed values and subtracts the odd-indexed values of
@@ -162,41 +161,41 @@ _mm_moveldup_ps(__m128 __a)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VADDSUBPD instruction.
+/// This intrinsic corresponds to the <c> VADDSUBPD </c> instruction.
 ///
 /// \param __a
 ///    A 128-bit vector of [2 x double] containing the left source operand.
 /// \param __b
 ///    A 128-bit vector of [2 x double] containing the right source operand.
-/// \returns A 128-bit vector of [2 x double] containing the alternating sums 
+/// \returns A 128-bit vector of [2 x double] containing the alternating sums
 ///    and differences of both operands.
 static __inline__ __m128d __DEFAULT_FN_ATTRS
 _mm_addsub_pd(__m128d __a, __m128d __b)
 {
-  return __builtin_ia32_addsubpd(__a, __b);
+  return __builtin_ia32_addsubpd((__v2df)__a, (__v2df)__b);
 }
 
-/// \brief Horizontally adds the pairs of values contained in two 128-bit 
+/// \brief Horizontally adds the pairs of values contained in two 128-bit
 ///    vectors of [2 x double].
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VHADDPD instruction.
+/// This intrinsic corresponds to the <c> VHADDPD </c> instruction.
 ///
 /// \param __a
-///    A 128-bit vector of [2 x double] containing one of the source operands. 
-///    The horizontal sum of the values is stored in the lower bits of the 
+///    A 128-bit vector of [2 x double] containing one of the source operands.
+///    The horizontal sum of the values is stored in the lower bits of the
 ///    destination.
 /// \param __b
-///    A 128-bit vector of [2 x double] containing one of the source operands. 
-///    The horizontal sum of the values is stored in the upper bits of the 
+///    A 128-bit vector of [2 x double] containing one of the source operands.
+///    The horizontal sum of the values is stored in the upper bits of the
 ///    destination.
 /// \returns A 128-bit vector of [2 x double] containing the horizontal sums of
 ///    both operands.
 static __inline__ __m128d __DEFAULT_FN_ATTRS
 _mm_hadd_pd(__m128d __a, __m128d __b)
 {
-  return __builtin_ia32_haddpd(__a, __b);
+  return __builtin_ia32_haddpd((__v2df)__a, (__v2df)__b);
 }
 
 /// \brief Horizontally subtracts the pairs of values contained in two 128-bit
@@ -204,22 +203,22 @@ _mm_hadd_pd(__m128d __a, __m128d __b)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VHSUBPD instruction.
+/// This intrinsic corresponds to the <c> VHSUBPD </c> instruction.
 ///
 /// \param __a
-///    A 128-bit vector of [2 x double] containing one of the source operands. 
+///    A 128-bit vector of [2 x double] containing one of the source operands.
 ///    The horizontal difference of the values is stored in the lower bits of
 ///    the destination.
 /// \param __b
-///    A 128-bit vector of [2 x double] containing one of the source operands. 
+///    A 128-bit vector of [2 x double] containing one of the source operands.
 ///    The horizontal difference of the values is stored in the upper bits of
 ///    the destination.
-/// \returns A 128-bit vector of [2 x double] containing the horizontal 
+/// \returns A 128-bit vector of [2 x double] containing the horizontal
 ///    differences of both operands.
 static __inline__ __m128d __DEFAULT_FN_ATTRS
 _mm_hsub_pd(__m128d __a, __m128d __b)
 {
-  return __builtin_ia32_hsubpd(__a, __b);
+  return __builtin_ia32_hsubpd((__v2df)__a, (__v2df)__b);
 }
 
 /// \brief Moves and duplicates one double-precision value to double-precision
@@ -227,35 +226,35 @@ _mm_hsub_pd(__m128d __a, __m128d __b)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// \code 
+/// \code
 /// __m128d _mm_loaddup_pd(double const * dp);
-/// \endcode 
+/// \endcode
 ///
-/// This intrinsic corresponds to the \c VMOVDDUP instruction.
+/// This intrinsic corresponds to the <c> VMOVDDUP </c> instruction.
 ///
 /// \param dp
 ///    A pointer to a double-precision value to be moved and duplicated.
-/// \returns A 128-bit vector of [2 x double] containing the moved and 
+/// \returns A 128-bit vector of [2 x double] containing the moved and
 ///    duplicated values.
 #define        _mm_loaddup_pd(dp)        _mm_load1_pd(dp)
 
-/// \brief Moves and duplicates the double-precision value in the lower bits of 
+/// \brief Moves and duplicates the double-precision value in the lower bits of
 ///    a 128-bit vector of [2 x double] to double-precision values stored in a
 ///    128-bit vector of [2 x double].
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c VMOVDDUP instruction.
+/// This intrinsic corresponds to the <c> VMOVDDUP </c> instruction.
 ///
 /// \param __a
-///    A 128-bit vector of [2 x double]. Bits [63:0] are written to bits 
+///    A 128-bit vector of [2 x double]. Bits [63:0] are written to bits
 ///    [127:64] and [63:0] of the destination.
-/// \returns A 128-bit vector of [2 x double] containing the moved and 
+/// \returns A 128-bit vector of [2 x double] containing the moved and
 ///    duplicated values.
 static __inline__ __m128d __DEFAULT_FN_ATTRS
 _mm_movedup_pd(__m128d __a)
 {
-  return __builtin_shufflevector(__a, __a, 0, 0);
+  return __builtin_shufflevector((__v2df)__a, (__v2df)__a, 0, 0);
 }
 
 #define _MM_DENORMALS_ZERO_ON   (0x0040)
@@ -266,16 +265,16 @@ _mm_movedup_pd(__m128d __a)
 #define _MM_GET_DENORMALS_ZERO_MODE() (_mm_getcsr() & _MM_DENORMALS_ZERO_MASK)
 #define _MM_SET_DENORMALS_ZERO_MODE(x) (_mm_setcsr((_mm_getcsr() & ~_MM_DENORMALS_ZERO_MASK) | (x)))
 
-/// \brief Establishes a linear address memory range to be monitored and puts 
-///    the processor in the monitor event pending state. Data stored in the 
+/// \brief Establishes a linear address memory range to be monitored and puts
+///    the processor in the monitor event pending state. Data stored in the
 ///    monitored address range causes the processor to exit the pending state.
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c MONITOR instruction.
+/// This intrinsic corresponds to the <c> MONITOR </c> instruction.
 ///
 /// \param __p
-///    The memory range to be monitored. The size of the range is determined by 
+///    The memory range to be monitored. The size of the range is determined by
 ///    CPUID function 0000_0005h.
 /// \param __extensions
 ///    Optional extensions for the monitoring state.
@@ -293,10 +292,10 @@ _mm_monitor(void const *__p, unsigned __extensions, unsigned __hints)
 ///
 /// \headerfile <x86intrin.h>
 ///
-/// This intrinsic corresponds to the \c MWAIT instruction.
+/// This intrinsic corresponds to the <c> MWAIT </c> instruction.
 ///
 /// \param __extensions
-///    Optional extensions for the monitoring state, which may vary by 
+///    Optional extensions for the monitoring state, which may vary by
 ///    processor.
 /// \param __hints
 ///    Optional hints for the monitoring state, which may vary by processor.

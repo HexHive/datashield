@@ -19,7 +19,6 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Format/Format.h"
 #include "llvm/Support/Debug.h"
-#include <string>
 
 #define DEBUG_TYPE "format-formatter"
 
@@ -64,7 +63,7 @@ static bool startsNextParameter(const FormatToken &Current,
 
 ContinuationIndenter::ContinuationIndenter(const FormatStyle &Style,
                                            const AdditionalKeywords &Keywords,
-                                           SourceManager &SourceMgr,
+                                           const SourceManager &SourceMgr,
                                            WhitespaceManager &Whitespaces,
                                            encoding::Encoding Encoding,
                                            bool BinPackInconclusiveFunctions)
@@ -136,6 +135,12 @@ bool ContinuationIndenter::canBreak(const LineState &State) {
       return false;
   }
 
+  // If binary operators are moved to the next line (including commas for some
+  // styles of constructor initializers), that's always ok.
+  if (!Current.isOneOf(TT_BinaryOperator, tok::comma) &&
+      State.Stack.back().NoLineBreakInOperand)
+    return false;
+
   return !State.Stack.back().NoLineBreak;
 }
 
@@ -178,6 +183,9 @@ bool ContinuationIndenter::mustBreak(const LineState &State) {
       ((Style.AllowShortFunctionsOnASingleLine != FormatStyle::SFS_All) ||
        Style.BreakConstructorInitializersBeforeComma || Style.ColumnLimit != 0))
     return true;
+  if (Current.is(TT_ObjCMethodExpr) && !Previous.is(TT_SelectorName) &&
+      State.Line->startsWith(TT_ObjCMethodSpecifier))
+    return true;
   if (Current.is(TT_SelectorName) && State.Stack.back().ObjCSelectorNameFound &&
       State.Stack.back().BreakBeforeParameter)
     return true;
@@ -187,6 +195,11 @@ bool ContinuationIndenter::mustBreak(const LineState &State) {
       State.Column + getLengthToNextOperator(Current) > Style.ColumnLimit &&
       (State.Column > NewLineColumn ||
        Current.NestingLevel < State.StartOfLineLevel))
+    return true;
+
+  if (startsSegmentOfBuilderTypeCall(Current) &&
+      (State.Stack.back().CallContinuation != 0 ||
+       State.Stack.back().BreakBeforeParameter))
     return true;
 
   if (State.Column <= NewLineColumn)
@@ -251,11 +264,6 @@ bool ContinuationIndenter::mustBreak(const LineState &State) {
   if ((Current.is(TT_FunctionDeclarationName) ||
        (Current.is(tok::kw_operator) && !Previous.is(tok::coloncolon))) &&
       !Previous.is(tok::kw_template) && State.Stack.back().BreakBeforeParameter)
-    return true;
-
-  if (startsSegmentOfBuilderTypeCall(Current) &&
-      (State.Stack.back().CallContinuation != 0 ||
-       State.Stack.back().BreakBeforeParameter))
     return true;
 
   // The following could be precomputed as they do not depend on the state.
@@ -356,7 +364,17 @@ void ContinuationIndenter::addTokenOnCurrentLine(LineState &State, bool DryRun,
       Previous.isOneOf(tok::l_paren, TT_TemplateOpener, tok::l_square) &&
       State.Column > getNewLineColumn(State) &&
       (!Previous.Previous ||
-       !Previous.Previous->isOneOf(tok::kw_for, tok::kw_while, tok::kw_switch)))
+       !Previous.Previous->isOneOf(tok::kw_for, tok::kw_while,
+                                   tok::kw_switch)) &&
+      // Don't do this for simple (no expressions) one-argument function calls
+      // as that feels like needlessly wasting whitespace, e.g.:
+      //
+      //   caaaaaaaaaaaall(
+      //       caaaaaaaaaaaall(
+      //           caaaaaaaaaaaall(
+      //               caaaaaaaaaaaaaaaaaaaaaaall(aaaaaaaaaaaaaa, aaaaaaaaa))));
+      Current.FakeLParens.size() > 0 &&
+      Current.FakeLParens.back() > prec::Unknown)
     State.Stack.back().NoLineBreak = true;
 
   if (Style.AlignAfterOpenBracket != FormatStyle::BAS_DontAlign &&
@@ -383,6 +401,27 @@ void ContinuationIndenter::addTokenOnCurrentLine(LineState &State, bool DryRun,
     State.Stack.back().NoLineBreak = true;
   }
 
+  // Don't allow the RHS of an operator to be split over multiple lines unless
+  // there is a line-break right after the operator.
+  // Exclude relational operators, as there, it is always more desirable to
+  // have the LHS 'left' of the RHS.
+  const FormatToken *P = Current.getPreviousNonComment();
+  if (!Current.is(tok::comment) && P &&
+      (P->isOneOf(TT_BinaryOperator, tok::comma) ||
+       (P->is(TT_ConditionalExpr) && P->is(tok::colon))) &&
+      !P->isOneOf(TT_OverloadedOperator, TT_CtorInitializerComma) &&
+      P->getPrecedence() != prec::Assignment &&
+      P->getPrecedence() != prec::Relational) {
+    bool BreakBeforeOperator =
+        P->is(tok::lessless) ||
+        (P->is(TT_BinaryOperator) &&
+         Style.BreakBeforeBinaryOperators != FormatStyle::BOS_None) ||
+        (P->is(TT_ConditionalExpr) && Style.BreakBeforeTernaryOperators);
+    if (!BreakBeforeOperator ||
+        (!State.Stack.back().LastOperatorWrapped && BreakBeforeOperator))
+      State.Stack.back().NoLineBreakInOperand = true;
+  }
+
   State.Column += Spaces;
   if (Current.isNot(tok::comment) && Previous.is(tok::l_paren) &&
       Previous.Previous &&
@@ -402,9 +441,9 @@ void ContinuationIndenter::addTokenOnCurrentLine(LineState &State, bool DryRun,
                (Previous.isNot(tok::lessless) || Previous.OperatorIndex != 0 ||
                 Previous.NextOperator)) ||
               Current.StartsBinaryExpression)) {
-    // Always indent relative to the RHS of the expression unless this is a
-    // simple assignment without binary expression on the RHS. Also indent
-    // relative to unary operators and the colons of constructor initializers.
+    // Indent relative to the RHS of the expression unless this is a simple
+    // assignment without binary expression on the RHS. Also indent relative to
+    // unary operators and the colons of constructor initializers.
     State.Stack.back().LastSpace = State.Column;
   } else if (Previous.is(TT_InheritanceColon)) {
     State.Stack.back().Indent = State.Column;
@@ -448,7 +487,7 @@ unsigned ContinuationIndenter::addTokenOnNewLine(LineState &State,
   Penalty += State.NextToken->SplitPenalty;
 
   // Breaking before the first "<<" is generally not desirable if the LHS is
-  // short. Also always add the penalty if the LHS is split over mutliple lines
+  // short. Also always add the penalty if the LHS is split over multiple lines
   // to avoid unnecessary line breaks that just work around this penalty.
   if (NextNonComment->is(tok::lessless) &&
       State.Stack.back().FirstLessLess == 0 &&
@@ -466,10 +505,13 @@ unsigned ContinuationIndenter::addTokenOnNewLine(LineState &State,
   //     // code
   //   }
   //
-  // is common and should be formatted like a free-standing function.
-  if (Style.Language != FormatStyle::LK_JavaScript ||
-      Current.NestingLevel != 0 || !PreviousNonComment->is(tok::equal) ||
-      !Current.is(Keywords.kw_function))
+  // is common and should be formatted like a free-standing function. The same
+  // goes for wrapping before the lambda return type arrow.
+  if (!Current.is(TT_LambdaArrow) &&
+      (Style.Language != FormatStyle::LK_JavaScript ||
+       Current.NestingLevel != 0 || !PreviousNonComment ||
+       !PreviousNonComment->is(tok::equal) ||
+       !Current.isOneOf(Keywords.kw_async, Keywords.kw_function)))
     State.Stack.back().NestedBlockIndent = State.Column;
 
   if (NextNonComment->isMemberAccess()) {
@@ -508,7 +550,8 @@ unsigned ContinuationIndenter::addTokenOnNewLine(LineState &State,
           Style.ContinuationIndentWidth;
   }
 
-  if ((Previous.isOneOf(tok::comma, tok::semi) &&
+  if ((PreviousNonComment &&
+       PreviousNonComment->isOneOf(tok::comma, tok::semi) &&
        !State.Stack.back().AvoidBinPacking) ||
       Previous.is(TT_BinaryOperator))
     State.Stack.back().BreakBeforeParameter = false;
@@ -531,6 +574,12 @@ unsigned ContinuationIndenter::addTokenOnNewLine(LineState &State,
 
   if (!Current.isTrailingComment())
     State.Stack.back().LastSpace = State.Column;
+  if (Current.is(tok::lessless))
+    // If we are breaking before a "<<", we always want to indent relative to
+    // RHS. This is necessary only for "<<", as we special-case it and don't
+    // always indent relative to the RHS.
+    State.Stack.back().LastSpace += 3; // 3 -> width of "<< ".
+
   State.StartOfLineLevel = Current.NestingLevel;
   State.LowestLevelOnLine = Current.NestingLevel;
 
@@ -538,6 +587,7 @@ unsigned ContinuationIndenter::addTokenOnNewLine(LineState &State,
   // and we need to avoid bin packing there.
   bool NestedBlockSpecialCase =
       Style.Language != FormatStyle::LK_Cpp &&
+      Style.Language != FormatStyle::LK_ObjC &&
       Current.is(tok::r_brace) && State.Stack.size() > 1 &&
       State.Stack[State.Stack.size() - 2].NestedBlockInlined;
   if (!NestedBlockSpecialCase)
@@ -653,6 +703,8 @@ unsigned ContinuationIndenter::getNewLineColumn(const LineState &State) {
       return State.Stack.back().ColonPos - NextNonComment->ColumnWidth;
     return State.Stack.back().Indent;
   }
+  if (NextNonComment->is(tok::colon) && NextNonComment->is(TT_ObjCMethodExpr))
+    return State.Stack.back().ColonPos;
   if (NextNonComment->is(TT_ArraySubscriptLSquare)) {
     if (State.Stack.back().StartOfArraySubscripts != 0)
       return State.Stack.back().StartOfArraySubscripts;
@@ -691,6 +743,8 @@ unsigned ContinuationIndenter::moveStateToNextToken(LineState &State,
   assert(State.Stack.size());
   const FormatToken &Current = *State.NextToken;
 
+  if (Current.isOneOf(tok::comma, TT_BinaryOperator))
+    State.Stack.back().NoLineBreakInOperand = false;
   if (Current.is(TT_InheritanceColon))
     State.Stack.back().AvoidBinPacking = true;
   if (Current.is(tok::lessless) && Current.isNot(TT_OverloadedOperator)) {
@@ -699,8 +753,10 @@ unsigned ContinuationIndenter::moveStateToNextToken(LineState &State,
     else
       State.Stack.back().LastOperatorWrapped = Newline;
   }
-  if ((Current.is(TT_BinaryOperator) && Current.isNot(tok::lessless)) ||
-      Current.is(TT_ConditionalExpr))
+  if (Current.is(TT_BinaryOperator) && Current.isNot(tok::lessless))
+    State.Stack.back().LastOperatorWrapped = Newline;
+  if (Current.is(TT_ConditionalExpr) && Current.Previous &&
+      !Current.Previous->is(TT_ConditionalExpr))
     State.Stack.back().LastOperatorWrapped = Newline;
   if (Current.is(TT_ArraySubscriptLSquare) &&
       State.Stack.back().StartOfArraySubscripts == 0)
@@ -823,6 +879,8 @@ void ContinuationIndenter::moveStatePastFakeLParens(LineState &State,
        I != E; ++I) {
     ParenState NewParenState = State.Stack.back();
     NewParenState.ContainsLineBreak = false;
+    NewParenState.NoLineBreak =
+        NewParenState.NoLineBreak || State.Stack.back().NoLineBreakInOperand;
 
     // Indent from 'LastSpace' unless these are fake parentheses encapsulating
     // a builder type call after 'return' or, if the alignment after opening
@@ -836,24 +894,6 @@ void ContinuationIndenter::moveStatePastFakeLParens(LineState &State,
       NewParenState.Indent =
           std::max(std::max(State.Column, NewParenState.Indent),
                    State.Stack.back().LastSpace);
-
-    // Don't allow the RHS of an operator to be split over multiple lines unless
-    // there is a line-break right after the operator.
-    // Exclude relational operators, as there, it is always more desirable to
-    // have the LHS 'left' of the RHS.
-    if (Previous && Previous->getPrecedence() > prec::Assignment &&
-        Previous->isOneOf(TT_BinaryOperator, TT_ConditionalExpr) &&
-        Previous->getPrecedence() != prec::Relational) {
-      bool BreakBeforeOperator =
-          Previous->is(tok::lessless) ||
-          (Previous->is(TT_BinaryOperator) &&
-           Style.BreakBeforeBinaryOperators != FormatStyle::BOS_None) ||
-          (Previous->is(TT_ConditionalExpr) &&
-           Style.BreakBeforeTernaryOperators);
-      if ((!Newline && !BreakBeforeOperator) ||
-          (!State.Stack.back().LastOperatorWrapped && BreakBeforeOperator))
-        NewParenState.NoLineBreak = true;
-    }
 
     // Do not indent relative to the fake parentheses inserted for "." or "->".
     // This is a special case to make the following to statements consistent:
@@ -982,6 +1022,7 @@ void ContinuationIndenter::moveStatePastScopeOpener(LineState &State,
       Current.Children.empty() &&
       !Current.isOneOf(TT_DictLiteral, TT_ArrayInitializerLSquare) &&
       (State.Stack.back().NoLineBreak ||
+       State.Stack.back().NoLineBreakInOperand ||
        (Current.is(TT_TemplateOpener) &&
         State.Stack.back().ContainsUnwrappedBuilder));
   State.Stack.push_back(ParenState(NewIndent, NewIndentLevel, LastSpace,
@@ -1029,6 +1070,9 @@ void ContinuationIndenter::moveStateToNewBlock(LineState &State) {
 
 unsigned ContinuationIndenter::addMultilineToken(const FormatToken &Current,
                                                  LineState &State) {
+  if (!Current.IsMultiline)
+    return 0;
+
   // Break before further function parameters on all levels.
   for (unsigned i = 0, e = State.Stack.size(); i != e; ++i)
     State.Stack[i].BreakBeforeParameter = true;
@@ -1108,10 +1152,10 @@ unsigned ContinuationIndenter::breakProtrudingToken(const FormatToken &Current,
     } else {
       return 0;
     }
-  } else if (Current.is(TT_BlockComment) && Current.isTrailingComment()) {
-    if (!Style.ReflowComments ||
+  } else if (Current.is(TT_BlockComment)) {
+    if (!Current.isTrailingComment() || !Style.ReflowComments ||
         CommentPragmasRegex.match(Current.TokenText.substr(2)))
-      return 0;
+      return addMultilineToken(Current, State);
     Token.reset(new BreakableBlockComment(
         Current, State.Line->Level, StartColumn, Current.OriginalColumn,
         !Current.Previous, State.Line->InPPDirective, Encoding, Style));

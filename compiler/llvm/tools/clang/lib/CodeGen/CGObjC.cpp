@@ -589,11 +589,10 @@ static void emitStructGetterCall(CodeGenFunction &CGF, ObjCIvarDecl *ivar,
   args.add(RValue::get(CGF.Builder.getInt1(isAtomic)), Context.BoolTy);
   args.add(RValue::get(CGF.Builder.getInt1(hasStrong)), Context.BoolTy);
 
-  llvm::Value *fn = CGF.CGM.getObjCRuntime().GetGetStructFunction();
-  CGF.EmitCall(CGF.getTypes().arrangeFreeFunctionCall(Context.VoidTy, args,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All),
-               fn, ReturnValueSlot(), args);
+  llvm::Constant *fn = CGF.CGM.getObjCRuntime().GetGetStructFunction();
+  CGCallee callee = CGCallee::forDirect(fn);
+  CGF.EmitCall(CGF.getTypes().arrangeBuiltinFunctionCall(Context.VoidTy, args),
+               callee, ReturnValueSlot(), args);
 }
 
 /// Determine whether the given architecture supports unaligned atomic
@@ -854,13 +853,12 @@ static void emitCPPObjectAtomicGetterCall(CodeGenFunction &CGF,
   // Third argument is the helper function.
   args.add(RValue::get(AtomicHelperFn), CGF.getContext().VoidPtrTy);
   
-  llvm::Value *copyCppAtomicObjectFn = 
+  llvm::Constant *copyCppAtomicObjectFn = 
     CGF.CGM.getObjCRuntime().GetCppAtomicObjectGetFunction();
-  CGF.EmitCall(CGF.getTypes().arrangeFreeFunctionCall(CGF.getContext().VoidTy,
-                                                      args,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All),
-               copyCppAtomicObjectFn, ReturnValueSlot(), args);
+  CGCallee callee = CGCallee::forDirect(copyCppAtomicObjectFn);
+  CGF.EmitCall(
+      CGF.getTypes().arrangeBuiltinFunctionCall(CGF.getContext().VoidTy, args),
+               callee, ReturnValueSlot(), args);
 }
 
 void
@@ -901,21 +899,29 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
 
     // Currently, all atomic accesses have to be through integer
     // types, so there's no point in trying to pick a prettier type.
-    llvm::Type *bitcastType =
-      llvm::Type::getIntNTy(getLLVMContext(),
-                            getContext().toBits(strategy.getIvarSize()));
+    uint64_t ivarSize = getContext().toBits(strategy.getIvarSize());
+    llvm::Type *bitcastType = llvm::Type::getIntNTy(getLLVMContext(), ivarSize);
     bitcastType = bitcastType->getPointerTo(); // addrspace 0 okay
 
     // Perform an atomic load.  This does not impose ordering constraints.
     Address ivarAddr = LV.getAddress();
     ivarAddr = Builder.CreateBitCast(ivarAddr, bitcastType);
     llvm::LoadInst *load = Builder.CreateLoad(ivarAddr, "load");
-    load->setAtomic(llvm::Unordered);
+    load->setAtomic(llvm::AtomicOrdering::Unordered);
 
     // Store that value into the return address.  Doing this with a
     // bitcast is likely to produce some pretty ugly IR, but it's not
     // the *most* terrible thing in the world.
-    Builder.CreateStore(load, Builder.CreateBitCast(ReturnValue, bitcastType));
+    llvm::Type *retTy = ConvertType(getterMethod->getReturnType());
+    uint64_t retTySize = CGM.getDataLayout().getTypeSizeInBits(retTy);
+    llvm::Value *ivarVal = load;
+    if (ivarSize > retTySize) {
+      llvm::Type *newTy = llvm::Type::getIntNTy(getLLVMContext(), retTySize);
+      ivarVal = Builder.CreateTrunc(load, newTy);
+      bitcastType = newTy->getPointerTo();
+    }
+    Builder.CreateStore(ivarVal,
+                        Builder.CreateBitCast(ReturnValue, bitcastType));
 
     // Make sure we don't do an autorelease.
     AutoreleaseResult = false;
@@ -923,12 +929,13 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
   }
 
   case PropertyImplStrategy::GetSetProperty: {
-    llvm::Value *getPropertyFn =
+    llvm::Constant *getPropertyFn =
       CGM.getObjCRuntime().GetPropertyGetFunction();
     if (!getPropertyFn) {
       CGM.ErrorUnsupported(propImpl, "Obj-C getter requiring atomic copy");
       return;
     }
+    CGCallee callee = CGCallee::forDirect(getPropertyFn);
 
     // Return (ivar-type) objc_getProperty((id) self, _cmd, offset, true).
     // FIXME: Can't this be simpler? This might even be worse than the
@@ -950,10 +957,8 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
     // runtime already should have computed it to build the function.
     llvm::Instruction *CallInstruction;
     RValue RV = EmitCall(
-        getTypes().arrangeFreeFunctionCall(
-            propType, args, FunctionType::ExtInfo(), RequiredArgs::All),
-        getPropertyFn, ReturnValueSlot(), args, CGCalleeInfo(),
-        &CallInstruction);
+        getTypes().arrangeBuiltinFunctionCall(propType, args),
+        callee, ReturnValueSlot(), args, &CallInstruction);
     if (llvm::CallInst *call = dyn_cast<llvm::CallInst>(CallInstruction))
       call->setTailCall();
 
@@ -1015,7 +1020,6 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
           AutoreleaseResult = false;
         }
 
-        value = Builder.CreateBitCast(value, ConvertType(propType));
         value = Builder.CreateBitCast(
             value, ConvertType(GetterMethodDecl->getReturnType()));
       }
@@ -1066,12 +1070,11 @@ static void emitStructSetterCall(CodeGenFunction &CGF, ObjCMethodDecl *OMD,
   // FIXME: should this really always be false?
   args.add(RValue::get(CGF.Builder.getFalse()), CGF.getContext().BoolTy);
 
-  llvm::Value *copyStructFn = CGF.CGM.getObjCRuntime().GetSetStructFunction();
-  CGF.EmitCall(CGF.getTypes().arrangeFreeFunctionCall(CGF.getContext().VoidTy,
-                                                      args,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All),
-               copyStructFn, ReturnValueSlot(), args);
+  llvm::Constant *fn = CGF.CGM.getObjCRuntime().GetSetStructFunction();
+  CGCallee callee = CGCallee::forDirect(fn);
+  CGF.EmitCall(
+      CGF.getTypes().arrangeBuiltinFunctionCall(CGF.getContext().VoidTy, args),
+               callee, ReturnValueSlot(), args);
 }
 
 /// emitCPPObjectAtomicSetterCall - Call the runtime function to store 
@@ -1103,13 +1106,12 @@ static void emitCPPObjectAtomicSetterCall(CodeGenFunction &CGF,
   // Third argument is the helper function.
   args.add(RValue::get(AtomicHelperFn), CGF.getContext().VoidPtrTy);
   
-  llvm::Value *copyCppAtomicObjectFn = 
+  llvm::Constant *fn = 
     CGF.CGM.getObjCRuntime().GetCppAtomicObjectSetFunction();
-  CGF.EmitCall(CGF.getTypes().arrangeFreeFunctionCall(CGF.getContext().VoidTy,
-                                                      args,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All),
-               copyCppAtomicObjectFn, ReturnValueSlot(), args);
+  CGCallee callee = CGCallee::forDirect(fn);
+  CGF.EmitCall(
+      CGF.getTypes().arrangeBuiltinFunctionCall(CGF.getContext().VoidTy, args),
+               callee, ReturnValueSlot(), args);
 }
 
 
@@ -1192,15 +1194,15 @@ CodeGenFunction::generateObjCSetterBody(const ObjCImplementationDecl *classImpl,
 
     // Perform an atomic store.  There are no memory ordering requirements.
     llvm::StoreInst *store = Builder.CreateStore(load, ivarAddr);
-    store->setAtomic(llvm::Unordered);
+    store->setAtomic(llvm::AtomicOrdering::Unordered);
     return;
   }
 
   case PropertyImplStrategy::GetSetProperty:
   case PropertyImplStrategy::SetPropertyAndExpressionGet: {
 
-    llvm::Value *setOptimizedPropertyFn = nullptr;
-    llvm::Value *setPropertyFn = nullptr;
+    llvm::Constant *setOptimizedPropertyFn = nullptr;
+    llvm::Constant *setPropertyFn = nullptr;
     if (UseOptimizedSetter(CGM)) {
       // 10.8 and iOS 6.0 code and GC is off
       setOptimizedPropertyFn = 
@@ -1238,10 +1240,9 @@ CodeGenFunction::generateObjCSetterBody(const ObjCImplementationDecl *classImpl,
     if (setOptimizedPropertyFn) {
       args.add(RValue::get(arg), getContext().getObjCIdType());
       args.add(RValue::get(ivarOffset), getContext().getPointerDiffType());
-      EmitCall(getTypes().arrangeFreeFunctionCall(getContext().VoidTy, args,
-                                                  FunctionType::ExtInfo(),
-                                                  RequiredArgs::All),
-               setOptimizedPropertyFn, ReturnValueSlot(), args);
+      CGCallee callee = CGCallee::forDirect(setOptimizedPropertyFn);
+      EmitCall(getTypes().arrangeBuiltinFunctionCall(getContext().VoidTy, args),
+               callee, ReturnValueSlot(), args);
     } else {
       args.add(RValue::get(ivarOffset), getContext().getPointerDiffType());
       args.add(RValue::get(arg), getContext().getObjCIdType());
@@ -1251,10 +1252,9 @@ CodeGenFunction::generateObjCSetterBody(const ObjCImplementationDecl *classImpl,
                getContext().BoolTy);
       // FIXME: We shouldn't need to get the function info here, the runtime
       // already should have computed it to build the function.
-      EmitCall(getTypes().arrangeFreeFunctionCall(getContext().VoidTy, args,
-                                                  FunctionType::ExtInfo(),
-                                                  RequiredArgs::All),
-               setPropertyFn, ReturnValueSlot(), args);
+      CGCallee callee = CGCallee::forDirect(setPropertyFn);
+      EmitCall(getTypes().arrangeBuiltinFunctionCall(getContext().VoidTy, args),
+               callee, ReturnValueSlot(), args);
     }
     
     return;
@@ -1456,13 +1456,14 @@ QualType CodeGenFunction::TypeOfSelfObject() {
 }
 
 void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
-  llvm::Constant *EnumerationMutationFn =
+  llvm::Constant *EnumerationMutationFnPtr =
     CGM.getObjCRuntime().EnumerationMutationFunction();
-
-  if (!EnumerationMutationFn) {
+  if (!EnumerationMutationFnPtr) {
     CGM.ErrorUnsupported(&S, "Obj-C fast enumeration for this runtime");
     return;
   }
+  CGCallee EnumerationMutationFn =
+    CGCallee::forDirect(EnumerationMutationFnPtr);
 
   CGDebugInfo *DI = getDebugInfo();
   if (DI)
@@ -1497,6 +1498,8 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
                                       llvm::APInt(32, NumItems),
                                       ArrayType::Normal, 0);
   Address ItemsPtr = CreateMemTemp(ItemsTy, "items.ptr");
+
+  RunCleanupsScope ForScope(*this);
 
   // Emit the collection pointer.  In ARC, we do a retain.
   llvm::Value *Collection;
@@ -1610,9 +1613,8 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
   Args2.add(RValue::get(V), getContext().getObjCIdType());
   // FIXME: We shouldn't need to get the function info here, the runtime already
   // should have computed it to build the function.
-  EmitCall(CGM.getTypes().arrangeFreeFunctionCall(getContext().VoidTy, Args2,
-                                                  FunctionType::ExtInfo(),
-                                                  RequiredArgs::All),
+  EmitCall(
+          CGM.getTypes().arrangeBuiltinFunctionCall(getContext().VoidTy, Args2),
            EnumerationMutationFn, ReturnValueSlot(), Args2);
 
   // Otherwise, or if the mutation function returns, just continue.
@@ -1667,7 +1669,8 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
     elementLValue = EmitLValue(cast<Expr>(S.getElement()));
     EmitStoreThroughLValue(RValue::get(CurrentItem), elementLValue);
   } else {
-    EmitScalarInit(CurrentItem, elementLValue);
+    EmitStoreThroughLValue(RValue::get(CurrentItem), elementLValue,
+                           /*isInit*/ true);
   }
 
   // If we do have an element variable, this assignment is the end of
@@ -1739,10 +1742,7 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
   if (DI)
     DI->EmitLexicalBlockEnd(Builder, S.getSourceRange().getEnd());
 
-  // Leave the cleanup we entered in ARC.
-  if (getLangOpts().ObjCAutoRefCount)
-    PopCleanupBlock();
-
+  ForScope.ForceCleanup();
   EmitBlock(LoopEnd.getBlock());
 }
 
@@ -1811,7 +1811,8 @@ static llvm::Constant *createARCRuntimeFunction(CodeGenModule &CGM,
     // If the target runtime doesn't naturally support ARC, emit weak
     // references to the runtime support library.  We don't really
     // permit this to fail, but we need a particular relocation style.
-    if (!CGM.getLangOpts().ObjCRuntime.hasNativeARC()) {
+    if (!CGM.getLangOpts().ObjCRuntime.hasNativeARC() &&
+        !CGM.getTriple().isOSBinFormatCOFF()) {
       f->setLinkage(llvm::Function::ExternalWeakLinkage);
     } else if (fnName == "objc_retain" || fnName  == "objc_release") {
       // If we have Native ARC, set nonlazybind attribute for these APIs for
@@ -3210,8 +3211,8 @@ CodeGenFunction::GenerateObjCAtomicSetterCopyHelperFunction(
   ImplicitParamDecl srcDecl(getContext(), FD, SourceLocation(), nullptr, SrcTy);
   args.push_back(&srcDecl);
 
-  const CGFunctionInfo &FI = CGM.getTypes().arrangeFreeFunctionDeclaration(
-      C.VoidTy, args, FunctionType::ExtInfo(), RequiredArgs::All);
+  const CGFunctionInfo &FI =
+    CGM.getTypes().arrangeBuiltinFunctionDeclaration(C.VoidTy, args);
 
   llvm::FunctionType *LTy = CGM.getTypes().GetFunctionType(FI);
   
@@ -3291,8 +3292,8 @@ CodeGenFunction::GenerateObjCAtomicGetterCopyHelperFunction(
   ImplicitParamDecl srcDecl(getContext(), FD, SourceLocation(), nullptr, SrcTy);
   args.push_back(&srcDecl);
 
-  const CGFunctionInfo &FI = CGM.getTypes().arrangeFreeFunctionDeclaration(
-      C.VoidTy, args, FunctionType::ExtInfo(), RequiredArgs::All);
+  const CGFunctionInfo &FI =
+    CGM.getTypes().arrangeBuiltinFunctionDeclaration(C.VoidTy, args);
 
   llvm::FunctionType *LTy = CGM.getTypes().GetFunctionType(FI);
   

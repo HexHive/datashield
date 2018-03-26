@@ -1265,7 +1265,7 @@ void test() {
   foo<BoolT<true>>(X);
 }
 // CHECK-ELIDE-NOTREE: no matching function for call to 'foo'
-// CHECK-ELIDE-NOTREE: candidate function [with T = BoolArgumentBitExtended::BoolT<true>] not viable: no known conversion from 'BoolT<false>' to 'BoolT<true>' for 1st argument
+// CHECK-ELIDE-NOTREE: candidate function not viable: no known conversion from 'BoolT<false>' to 'BoolT<true>' for 1st argument
 }
 
 namespace DifferentIntegralTypes {
@@ -1401,7 +1401,7 @@ void run() {
   f(1, integral_constant<bool, true>{});
 }
 // CHECK-ELIDE-NOTREE: error: no matching function for call to 'f'
-// CHECK-ELIDE-NOTREE: note: candidate function [with T = int] not viable: no known conversion from 'integral_constant<[...], true>' to 'integral_constant<[...], false>' for 2nd argument
+// CHECK-ELIDE-NOTREE: note: candidate function not viable: no known conversion from 'integral_constant<[...], true>' to 'integral_constant<[...], false>' for 2nd argument
 }
 
 namespace ZeroArgs {
@@ -1421,7 +1421,79 @@ B<const A<>> b4 = B<>();
 // CHECK-ELIDE-NOTREE: error: no viable conversion from 'B<A<...>>' to 'B<const A<...>>'
 }
 
+namespace TypeAlias {
+
+template <typename T> class vector {};
+
+template <int Dimension> class Point;
+template <int dimension, typename T> using Polygon = vector<Point<dimension>>;
+
+void foo(Polygon<3, float>);
+void bar() { foo(Polygon<2, float>()); }
+
+// CHECK-ELIDE-NOTREE: error: no matching function for call to 'foo'
+// CHECK-ELIDE-NOTREE: note: candidate function not viable: no known conversion from 'Polygon<2, [...]>' to 'Polygon<3, [...]>' for 1st argument
+
+enum class X {
+  X1,
+  X2,
+};
+
+template<X x> struct EnumToType;
+
+template <> struct EnumToType<X::X1> { using type = int; };
+
+template <> struct EnumToType<X::X2> { using type = double; };
+
+
+template <X x> using VectorType = vector<typename EnumToType<x>::type>;
+
+template <X x> void D(const VectorType<x>&);
+
+void run() {
+  D<X::X1>(VectorType<X::X2>());
+}
+// CHECK-ELIDE-NOTREE: error: no matching function for call to 'D'
+// CHECK-ELIDE-NOTREE: note: candidate function not viable: no known conversion from 'VectorType<X::X2>' to 'const VectorType<(TypeAlias::X)0>' for 1st argument
+}
+
+namespace TypeAlias2 {
+template <typename T>
+class A {};
+
+template <typename T>
+using A_reg = A<T>;
+void take_reg(A_reg<int>);
+
+template <typename T>
+using A_ptr = A<T> *;
+void take_ptr(A_ptr<int>);
+
+template <typename T>
+using A_ref = const A<T> &;
+void take_ref(A_ref<int>);
+
+void run(A_reg<float> reg, A_ptr<float> ptr, A_ref<float> ref) {
+  take_reg(reg);
+// CHECK-ELIDE-NOTREE: error: no matching function for call to 'take_reg'
+// CHECK-ELIDE-NOTREE: note:     candidate function not viable: no known conversion from 'A_reg<float>' to 'A_reg<int>' for 1st argument
+
+  take_ptr(ptr);
+// CHECK-ELIDE-NOTREE: error: no matching function for call to 'take_ptr'
+// CHECK-ELIDE-NOTREE: note:     candidate function not viable: no known conversion from 'A_ptr<float>' to 'A_ptr<int>' for 1st argument
+
+  take_ref(ref);
+// CHECK-ELIDE-NOTREE: error: no matching function for call to 'take_ref'
+// CHECK-ELIDE-NOTREE: note: candidate function not viable: no known conversion from 'const A<float>' to 'const A<int>' for 1st argument
+}
+}
+
 // CHECK-ELIDE-NOTREE: {{[0-9]*}} errors generated.
 // CHECK-NOELIDE-NOTREE: {{[0-9]*}} errors generated.
 // CHECK-ELIDE-TREE: {{[0-9]*}} errors generated.
 // CHECK-NOELIDE-TREE: {{[0-9]*}} errors generated.
+
+namespace pr30831 {
+  template <typename T> struct A { static A<T> const a; };
+  template <typename T> A<T> A<T>::a = A<T>();
+}
