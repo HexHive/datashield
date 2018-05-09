@@ -275,8 +275,11 @@ template <class ELFT> void Writer<ELFT>::createSyntheticSections() {
     In<ELFT>::Interp = nullptr;
   }
 
-  if (!Config->Relocatable)
+  if (!Config->Relocatable) {
     Symtab<ELFT>::X->Sections.push_back(createCommentSection<ELFT>());
+    In<ELFT>::Yolk = make<RelocationSection<ELFT>>(".yolk", false);
+    Symtab<ELFT>::X->Sections.push_back(In<ELFT>::Yolk);
+  }
 
   if (Config->Strip != StripPolicy::All) {
     In<ELFT>::StrTab = make<StringTableSection<ELFT>>(".strtab", false);
@@ -969,12 +972,13 @@ template <class ELFT> void Writer<ELFT>::sortSections() {
 template <class ELFT>
 static void
 finalizeSynthetic(const std::vector<SyntheticSection<ELFT> *> &Sections) {
-  for (SyntheticSection<ELFT> *SS : Sections)
+  for (SyntheticSection<ELFT> *SS : Sections) {
     if (SS && SS->OutSec && !SS->empty()) {
       SS->finalize();
       SS->OutSec->Size = 0;
       SS->OutSec->assignOffsets();
     }
+  }
 }
 
 // We need to add input synthetic sections early in createSyntheticSections()
@@ -1097,7 +1101,7 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
        In<ELFT>::GotPlt,    In<ELFT>::RelaDyn,    In<ELFT>::RelaIplt,
        In<ELFT>::RelaPlt,   In<ELFT>::Plt,        In<ELFT>::Iplt,
        In<ELFT>::Plt,       In<ELFT>::EhFrameHdr, In<ELFT>::VerSym,
-       In<ELFT>::VerNeed,   In<ELFT>::Dynamic});
+       In<ELFT>::VerNeed,   In<ELFT>::Yolk,       In<ELFT>::Dynamic});
 }
 
 template <class ELFT> void Writer<ELFT>::addPredefinedSections() {

@@ -564,6 +564,10 @@ static void reportUndefined(SymbolBody &Sym, InputSectionBase<ELFT> &S,
       Config->UnresolvedSymbols != UnresolvedPolicy::NoUndef)
     return;
 
+  // ignore yolk symbols
+  if (Sym.getName().startswith("yolk"))
+    return;
+
   std::string Msg =
       S.getLocation(Offset) + ": undefined symbol '" + toString(Sym) + "'";
 
@@ -610,6 +614,10 @@ static void scanRelocs(InputSectionBase<ELFT> &C, ArrayRef<RelTy> Rels) {
 
   auto AddDyn = [=](const DynamicReloc<ELFT> &Reloc) {
     In<ELFT>::RelaDyn->addReloc(Reloc);
+  };
+
+  auto AddYolk = [=](const DynamicReloc<ELFT> &Reloc) {
+    In<ELFT>::Yolk->addReloc(Reloc);
   };
 
   const elf::ObjectFile<ELFT> *File = C.getFile();
@@ -672,6 +680,12 @@ static void scanRelocs(InputSectionBase<ELFT> &C, ArrayRef<RelTy> Rels) {
       In<ELFT>::Got->HasGotOffRel = true;
 
     uintX_t Addend = computeAddend(*File, Buf, E, RI, Expr, Body);
+
+    // add to .yolk section
+    if (Body.getName().startswith("yolk")) {
+      AddYolk({Target->getDynRel(Type), &C, Offset, false, &Body, Addend});
+      continue;
+    }
 
     if (unsigned Processed =
             handleTlsRelocation<ELFT>(Type, Body, C, Offset, Addend, Expr)) {

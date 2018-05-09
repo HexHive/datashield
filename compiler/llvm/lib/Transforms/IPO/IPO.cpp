@@ -27,7 +27,6 @@ void llvm::initializeIPO(PassRegistry &Registry) {
   initializeArgPromotionPass(Registry);
   initializeConstantMergeLegacyPassPass(Registry);
   initializeCrossDSOCFIPass(Registry);
-  initializeDataShieldPass(Registry);
   initializeDAEPass(Registry);
   initializeDAHPass(Registry);
   initializeForceFunctionAttrsLegacyPassPass(Registry);

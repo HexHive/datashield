@@ -358,6 +358,7 @@ void initializeWriteBitcodePassPass(PassRegistry &);
 void initializeWriteThinLTOBitcodePass(PassRegistry &);
 void initializeXRayInstrumentationPass(PassRegistry &);
 void initializeDataShieldPass(PassRegistry &);
+void initializeXOSecretFuncPass(PassRegistry &);
 }
 
 #endif

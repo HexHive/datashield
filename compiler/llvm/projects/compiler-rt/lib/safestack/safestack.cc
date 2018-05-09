@@ -134,6 +134,9 @@ struct tinfo {
   size_t unsafe_stack_guard;
 };
 
+__attribute__((weak))
+void __safestack_sepseg_thread_start() {}
+
 /// Wrap the thread function in order to deallocate the unsafe stack when the
 /// thread terminates by returning from its main function.
 static void *thread_start(void *arg) {
@@ -169,6 +172,13 @@ static void thread_cleanup_handler(void *_iter) {
   }
 }
 
+// The SafeStack separate segment library overrides this to modify the
+// attributes.
+__attribute__((weak))
+void __safestack_sepseg_pthread_create(const pthread_attr_t **attr,
+                                       pthread_attr_t *tmpattr,
+                                       size_t size, size_t guard) {}
+
 /// Intercept thread creation operation to allocate and setup the unsafe stack
 INTERCEPTOR(int, pthread_create, pthread_t *thread,
             const pthread_attr_t *attr,
@@ -202,8 +212,19 @@ INTERCEPTOR(int, pthread_create, pthread_t *thread,
   tinfo->unsafe_stack_size = size;
   tinfo->unsafe_stack_guard = guard;
 
-  return REAL(pthread_create)(thread, attr, thread_start, tinfo);
+  pthread_attr_t tmpattr;
+  __safestack_sepseg_pthread_create(&attr, &tmpattr, size, guard);
+
+  int result = REAL(pthread_create)(thread, attr, thread_start, tinfo);
+
+  if (attr == &tmpattr)
+    CHECK_EQ(pthread_attr_destroy(&tmpattr), 0);
+
+  return result;
 }
+
+__attribute__((weak))
+void __safestack_sepseg_init(unsigned pageSize) {}
 
 extern "C" __attribute__((visibility("default")))
 #if !SANITIZER_CAN_USE_PREINIT_ARRAY
@@ -230,6 +251,8 @@ void __safestack_init() {
 
   // Setup the cleanup handler
   pthread_key_create(&thread_cleanup_key, thread_cleanup_handler);
+
+  __safestack_sepseg_init(pageSize);
 }
 
 #if SANITIZER_CAN_USE_PREINIT_ARRAY

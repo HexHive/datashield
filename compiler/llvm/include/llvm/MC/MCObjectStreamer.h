@@ -50,6 +50,10 @@ protected:
   ~MCObjectStreamer() override;
 
 public:
+
+  /// set YolkRef in CodeEmitter
+  void addExplicitComment(const Twine &T) override;
+
   /// state management
   void reset() override;
 

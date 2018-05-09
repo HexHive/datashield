@@ -424,6 +424,8 @@ getRelocTargetVA(uint32_t Type, typename ELFT::uint A, typename ELFT::uint P,
     if (Body.isUndefined() && !Body.isLocal() && Body.symbol()->isWeak())
       return getAArch64Page(A);
     return getAArch64Page(Body.getVA<ELFT>(A)) - getAArch64Page(P);
+  case R_YOLK:
+    return 0;
   }
   llvm_unreachable("Invalid expression");
 }

@@ -270,6 +270,9 @@ def FeatureFastLZCNT
     : SubtargetFeature<
           "fast-lzcnt", "HasFastLZCNT", "true",
           "LZCNT instructions are as fast as most simple integer ops">;
+def FeatureSeparateStackSeg
+    : SubtargetFeature<"separate-stack-seg", "UseSeparateStackSeg", "true",
+                       "Restrict access to the stack">;
 
 //===----------------------------------------------------------------------===//
 // X86 processors supported.

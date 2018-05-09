@@ -963,6 +963,9 @@ typename ELFT::uint DynamicReloc<ELFT>::getAddend() const {
 }
 
 template <class ELFT> uint32_t DynamicReloc<ELFT>::getSymIndex() const {
+  if (Sym->getName().startswith("yolk")) {
+    return In<ELFT>::SymTab->getGlobalSymIndex(Sym);
+  }
   if (Sym && !UseSymVA)
     return Sym->DynsymIndex;
   return 0;
@@ -980,6 +983,7 @@ template <class ELFT>
 void RelocationSection<ELFT>::addReloc(const DynamicReloc<ELFT> &Reloc) {
   if (Reloc.Type == Target->RelativeRel)
     ++NumRelativeRelocs;
+ 
   Relocs.push_back(Reloc);
 }
 
@@ -996,6 +1000,7 @@ static bool compRelocations(const RelTy &A, const RelTy &B) {
 template <class ELFT> void RelocationSection<ELFT>::writeTo(uint8_t *Buf) {
   uint8_t *BufBegin = Buf;
   for (const DynamicReloc<ELFT> &Rel : Relocs) {
+
     auto *P = reinterpret_cast<Elf_Rela *>(Buf);
     Buf += Config->Rela ? sizeof(Elf_Rela) : sizeof(Elf_Rel);
 
@@ -1174,6 +1179,18 @@ void SymbolTableSection<ELFT>::writeGlobalSymbols(uint8_t *Buf) {
     }
     ++ESym;
   }
+}
+
+template <class ELFT>
+uint32_t SymbolTableSection<ELFT>::getGlobalSymIndex(SymbolBody *Body) {
+  uint32_t Sindex = 1;
+  for (auto &S : Symbols) {
+    if (S.Symbol == Body) {
+      return Sindex + NumLocals;
+    }
+    Sindex++;
+  }
+  return 0;
 }
 
 template <class ELFT>

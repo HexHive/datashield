@@ -11,6 +11,7 @@
 #define LLVM_MC_MCCODEEMITTER_H
 
 #include "llvm/Support/Compiler.h"
+#include <string>
 
 namespace llvm {
 class MCFixup;
@@ -38,7 +39,9 @@ public:
   /// stream \p OS.
   virtual void encodeInstruction(const MCInst &Inst, raw_ostream &OS,
                                  SmallVectorImpl<MCFixup> &Fixups,
-                                 const MCSubtargetInfo &STI) const = 0;
+                                 const MCSubtargetInfo &STI) = 0;
+
+  virtual void setYolkRef(const std::string name) = 0;
 };
 
 } // End llvm namespace

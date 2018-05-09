@@ -49,6 +49,7 @@ static unsigned getFixupKindLog2Size(unsigned Kind) {
   case X86::reloc_signed_4byte:
   case X86::reloc_signed_4byte_relax:
   case X86::reloc_global_offset_table:
+  case X86::reloc_yolk_4byte:
   case FK_SecRel_4:
   case FK_Data_4:
     return 2;
@@ -56,6 +57,7 @@ static unsigned getFixupKindLog2Size(unsigned Kind) {
   case FK_SecRel_8:
   case FK_Data_8:
   case X86::reloc_global_offset_table8:
+  case X86::reloc_yolk_8byte:
     return 3;
   }
 }
@@ -98,6 +100,8 @@ public:
         {"reloc_signed_4byte_relax", 0, 32, 0},
         {"reloc_global_offset_table", 0, 32, 0},
         {"reloc_global_offset_table8", 0, 64, 0},
+        {"reloc_yolk_4byte", 0, 32, 0},
+        {"reloc_yolk_8byte", 0, 64, 0},
     };
 
     if (Kind < FirstTargetFixupKind)

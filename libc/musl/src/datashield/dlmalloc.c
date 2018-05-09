@@ -1322,6 +1322,7 @@ DLMALLOC_EXPORT int mspace_track_large_chunks(mspace msp, int enable);
   mspace_malloc behaves as malloc, but operates within
   the given space.
 */
+__attribute__((no_sanitize("safe-stack")))
 DLMALLOC_EXPORT void* mspace_malloc(mspace msp, size_t bytes);
 
 /*
@@ -5734,6 +5735,7 @@ void* mspace_realloc(mspace msp, void* oldmem, size_t bytes) {
   void* mem = 0;
   if (oldmem == 0) {
     mem = mspace_malloc(msp, bytes);
+    memset(mem, 0, bytes);
   }
   else if (bytes >= MAX_REQUEST) {
     MALLOC_FAILURE_ACTION;
@@ -5765,6 +5767,7 @@ void* mspace_realloc(mspace msp, void* oldmem, size_t bytes) {
       else {
         mem = mspace_malloc(m, bytes);
         if (mem != 0) {
+          memset(mem, 0, bytes);
           size_t oc = chunksize(oldp) - overhead_for(oldp);
           memcpy(mem, oldmem, (oc < bytes)? oc : bytes);
           mspace_free(m, oldmem);

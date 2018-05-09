@@ -523,6 +523,7 @@ void TargetPassConfig::addCodeGenPrepare() {
   if (getOptLevel() != CodeGenOpt::None && !DisableCGP)
     addPass(createCodeGenPreparePass(TM));
   addPass(createRewriteSymbolsPass());
+  addPass(createSafeStackPass(TM));
 }
 
 /// Add common passes that perform LLVM IR to IR transforms in preparation for
@@ -536,7 +537,7 @@ void TargetPassConfig::addISelPrepare() {
 
   // Add both the safe stack and the stack protection passes: each of them will
   // only protect functions that have corresponding attributes.
-  addPass(createSafeStackPass(TM));
+  //addPass(createSafeStackPass(TM));
   addPass(createStackProtectorPass(TM));
 
   if (PrintISelInput)

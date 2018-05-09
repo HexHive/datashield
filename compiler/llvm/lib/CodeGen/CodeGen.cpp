@@ -25,6 +25,7 @@ void llvm::initializeCodeGen(PassRegistry &Registry) {
   initializeBranchRelaxationPass(Registry);
   initializeCodeGenPreparePass(Registry);
   initializeCountingFunctionInserterPass(Registry);
+  initializeDataShieldPass(Registry);
   initializeDeadMachineInstructionElimPass(Registry);
   initializeDetectDeadLanesPass(Registry);
   initializeDwarfEHPreparePass(Registry);

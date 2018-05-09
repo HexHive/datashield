@@ -22,7 +22,8 @@ __clone:
 	and $-16,%ecx
 	sub $16,%ecx
 	mov 20(%ebp),%edi
-	mov %edi,(%ecx)
+	/* the ss prefix is needed to support the separate stack segment feature: */
+	mov %edi,%ss:(%ecx)
 	mov 24(%ebp),%edx
 	mov %esp,%esi
 	mov 32(%ebp),%edi

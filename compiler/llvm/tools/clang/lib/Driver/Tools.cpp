@@ -3319,8 +3319,12 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
     if (SanArgs.linkCXXRuntimes())
       StaticRuntimes.push_back("ubsan_standalone_cxx");
   }
-  if (SanArgs.needsSafeStackRt())
-    StaticRuntimes.push_back("safestack");
+  if (SanArgs.needsSafeStackRt() && !TC.getTriple().isMusl()) {
+    if (Args.hasFlag(options::OPT_mseparate_stack_seg, options::OPT_mno_separate_stack_seg, false))
+      StaticRuntimes.push_back("safestacksepseg");
+    else
+      StaticRuntimes.push_back("safestack");
+  }
   if (SanArgs.needsCfiRt())
     StaticRuntimes.push_back("cfi");
   if (SanArgs.needsCfiDiagRt()) {

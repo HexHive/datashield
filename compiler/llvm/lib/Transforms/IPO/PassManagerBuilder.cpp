@@ -399,6 +399,9 @@ void PassManagerBuilder::populateModulePassManager(
   // Allow forcing function attributes as a debugging and tuning aid.
   MPM.add(createForceFunctionAttrsLegacyPass());
 
+  // yolk
+  MPM.add(createXOSecretFuncPass());
+
   // If all optimizations are disabled, just run the always-inline pass and,
   // if enabled, the function merging pass.
   if (OptLevel == 0) {
@@ -423,7 +426,7 @@ void PassManagerBuilder::populateModulePassManager(
       MPM.add(createNameAnonGlobalPass());
 
     if(DoDataShieldModular) {
-        MPM.add(createDataShieldPass());
+        //MPM.add(createDataShieldPass());
     }
     
     addExtensionsToPM(EP_EnabledOnOptLevel0, MPM);
@@ -674,7 +677,7 @@ void PassManagerBuilder::populateModulePassManager(
   MPM.add(createInstructionSimplifierPass());
 
   if(DoDataShieldModular) {
-      MPM.add(createDataShieldPass());
+      //MPM.add(createDataShieldPass());
   }
 
   addExtensionsToPM(EP_OptimizerLast, MPM);
@@ -693,6 +696,9 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
 
   // Infer attributes about declarations if possible.
   PM.add(createInferFunctionAttrsLegacyPass());
+
+  // yolk
+  PM.add(createXOSecretFuncPass());
 
   if (OptLevel > 1) {
     // Indirect call promotion. This should promote all the targets that are
@@ -879,7 +885,7 @@ void PassManagerBuilder::populateLTOPassManager(legacy::PassManagerBase &PM) {
     addLateLTOOptimizationPasses(PM);
 
   if (DoDataShieldLTO) {
-    PM.add(createDataShieldPass());
+    //PM.add(createDataShieldPass());
     //PM.add(createVerifierPass());
     //if (OptLevel != 0)
     //  addLateLTOOptimizationPasses(PM);

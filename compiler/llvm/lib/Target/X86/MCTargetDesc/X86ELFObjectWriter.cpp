@@ -43,7 +43,7 @@ X86ELFObjectWriter::X86ELFObjectWriter(bool IsELF64, uint8_t OSABI,
 X86ELFObjectWriter::~X86ELFObjectWriter()
 {}
 
-enum X86_64RelType { RT64_64, RT64_32, RT64_32S, RT64_16, RT64_8 };
+enum X86_64RelType { RT64_64, RT64_64Y, RT64_32, RT64_32S, RT64_32Y, RT64_16, RT64_8 };
 
 static X86_64RelType getType64(unsigned Kind,
                                MCSymbolRefExpr::VariantKind &Modifier,
@@ -57,6 +57,8 @@ static X86_64RelType getType64(unsigned Kind,
     return RT64_64;
   case FK_Data_8:
     return RT64_64;
+  case X86::reloc_yolk_8byte:
+    return RT64_64Y;
   case X86::reloc_signed_4byte:
   case X86::reloc_signed_4byte_relax:
     if (Modifier == MCSymbolRefExpr::VK_None && !IsPCRel)
@@ -73,6 +75,8 @@ static X86_64RelType getType64(unsigned Kind,
   case X86::reloc_riprel_4byte_relax_rex:
   case X86::reloc_riprel_4byte_movq_load:
     return RT64_32;
+  case X86::reloc_yolk_4byte:
+    return RT64_32Y;
   case FK_PCRel_2:
   case FK_Data_2:
     return RT64_16;
@@ -99,10 +103,14 @@ static unsigned getRelocType64(MCContext &Ctx, SMLoc Loc,
     switch (Type) {
     case RT64_64:
       return IsPCRel ? ELF::R_X86_64_PC64 : ELF::R_X86_64_64;
+    case RT64_64Y:
+      return ELF::R_X86_64_64_YOLK;
     case RT64_32:
       return IsPCRel ? ELF::R_X86_64_PC32 : ELF::R_X86_64_32;
     case RT64_32S:
       return ELF::R_X86_64_32S;
+    case RT64_32Y:
+      return ELF::R_X86_64_32_YOLK;
     case RT64_16:
       return IsPCRel ? ELF::R_X86_64_PC16 : ELF::R_X86_64_16;
     case RT64_8:
@@ -194,15 +202,18 @@ static unsigned getRelocType64(MCContext &Ctx, SMLoc Loc,
   }
 }
 
-enum X86_32RelType { RT32_32, RT32_16, RT32_8 };
+enum X86_32RelType { RT32_32, RT32_32Y, RT32_16, RT32_8 };
 
 static X86_32RelType getType32(X86_64RelType T) {
   switch (T) {
   case RT64_64:
+  case RT64_64Y:
     llvm_unreachable("Unimplemented");
   case RT64_32:
   case RT64_32S:
     return RT32_32;
+  case RT64_32Y:
+    return RT32_32Y;
   case RT64_16:
     return RT32_16;
   case RT64_8:
@@ -222,6 +233,8 @@ static unsigned getRelocType32(MCContext &Ctx,
     switch (Type) {
     case RT32_32:
       return IsPCRel ? ELF::R_386_PC32 : ELF::R_386_32;
+    case RT32_32Y:
+      return ELF::R_386_32_YOLK;
     case RT32_16:
       return IsPCRel ? ELF::R_386_PC16 : ELF::R_386_16;
     case RT32_8:

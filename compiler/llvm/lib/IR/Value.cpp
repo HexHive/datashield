@@ -198,9 +198,12 @@ StringRef Value::getName() const {
 }
 
 void Value::setNameImpl(const Twine &NewName) {
+  // DataShield relies on names being available:
+#if 0
   // Fast-path: LLVMContext can be set to strip out non-GlobalValue names
   if (getContext().shouldDiscardValueNames() && !isa<GlobalValue>(this))
     return;
+#endif
 
   // Fast path for common IRBuilder case of setName("") when there is no name.
   if (NewName.isTriviallyEmpty() && !hasName())

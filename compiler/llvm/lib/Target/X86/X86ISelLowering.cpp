@@ -2056,7 +2056,7 @@ Value *X86TargetLowering::getSafeStackPointerLocation(IRBuilder<> &IRB) const {
   if (Subtarget.getTargetTriple().isOSContiki())
     return getDefaultSafeStackPointerLocation(IRB, false);
 
-  if (!Subtarget.isTargetAndroid())
+  if (!(Subtarget.isTargetAndroid() || Subtarget.getTargetTriple().isMusl()))
     return TargetLowering::getSafeStackPointerLocation(IRB);
 
   // Android provides a fixed TLS slot for the SafeStack pointer. See the

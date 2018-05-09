@@ -13,6 +13,7 @@
 
 static int traverses_stack_p(uintptr_t old, uintptr_t new)
 {
+#if !SAFE_STACK
 	const uintptr_t len = 8<<20;
 	uintptr_t a, b;
 
@@ -23,6 +24,7 @@ static int traverses_stack_p(uintptr_t old, uintptr_t new)
 	b = (uintptr_t)&b;
 	a = b > len ? b-len : 0;
 	if (new>a && old<b) return 1;
+#endif
 
 	return 0;
 }

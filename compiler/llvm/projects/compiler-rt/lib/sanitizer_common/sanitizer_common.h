@@ -97,6 +97,7 @@ void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type);
 // unaccessible memory.
 bool MprotectNoAccess(uptr addr, uptr size);
 bool MprotectReadOnly(uptr addr, uptr size);
+bool MprotectReadWrite(uptr addr, uptr size);
 
 // Find an available address space.
 uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding);

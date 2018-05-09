@@ -42,30 +42,6 @@ SECTIONS
       *(.rela.iplt)
       PROVIDE_HIDDEN (__rela_iplt_end = .);
     }
-  .init           :
-  {
-    /*KEEP (*(SORT_NONE(.init)))*/
-    KEEP (*(.init))
-  }
-  .plt            : { *(.plt) *(.iplt) }
-  .text           :
-  {
-    *(.text.unlikely .text.*_unlikely .text.unlikely.*)
-    *(.text.exit .text.exit.*)
-    *(.text.startup .text.startup.*)
-    *(.text.hot .text.hot.*)
-    *(.text .stub .text.* .gnu.linkonce.t.*)
-    /* .gnu.warning sections are handled specially by elf32.em.  */
-    *(.gnu.warning)
-  }
-  .fini           :
-  {
-    /*KEEP (*(SORT_NONE(.fini)))*/
-    KEEP (*(.fini))
-  }
-  PROVIDE (__etext = .);
-  PROVIDE (_etext = .);
-  PROVIDE (etext = .);
   .rodata         : { *(.rodata .rodata.* .gnu.linkonce.r.*) }
   .rodata1        : { *(.rodata1) }
   .eh_frame_hdr : { *(.eh_frame_hdr) }
@@ -180,11 +156,33 @@ SECTIONS
     *(.ldata .ldata.* .gnu.linkonce.l.*)
     . = ALIGN(. != 0 ? 64 / 8 : 1);
   }
-  /* hopefully this is a page boundary? */
-  . = 0x100000000;
-  . = SEGMENT_START("writable-sensitive-segment", .);
-  .sensitive2 : 
+  .unsafe_heap ALIGN(CONSTANT (MAXPAGESIZE)) :
   {
+    __unsafe_heap_start = .;
+    /* hopefully this is a page boundary? */
+    /*. = 0x100000000;*/
+    . = 0x10000000 - 0x200000;
+    __unsafe_heap_end = .;    
+  }
+
+/*
+  reserver space 0xfe00000-0xff00000 for unsafe mmap
+*/
+  . = 0x10000000 - 0x100000; 
+  .unsafe_stack ALIGN(CONSTANT (MAXPAGESIZE)) :
+  {
+    __unsafe_stack_start = .;
+    /* hopefully this is a page boundary? */
+    /*. = 0x100000000;*/
+    . = 0x10000000;
+    __unsafe_stack_end = .;    
+  }
+  . = SEGMENT_START("writable-sensitive-segment", .);
+  .sensitive2 ALIGN(CONSTANT (MAXPAGESIZE)) + (. & (CONSTANT (MAXPAGESIZE) - 1)) : 
+  {
+   . += 8; /* a __ds_hash result of 0 is considered invalid in musl/datashield/datashield.c,
+              so this prevents an object from being allocated at the beginning of the sensitive
+              region. */
    *(.sensitive2)
    . = ALIGN(64 / 8);
   }
@@ -206,6 +204,35 @@ SECTIONS
    . = ALIGN(64 / 8);
   }
   . = ALIGN(64 / 8);
+  .init           :
+  {
+    /*KEEP (*(SORT_NONE(.init)))*/
+    KEEP (*(.init))
+  }
+  .plt            : { *(.plt) *(.iplt) }
+  .text           :
+  {
+    *(.text.unlikely .text.*_unlikely .text.unlikely.*)
+    *(.text.exit .text.exit.*)
+    *(.text.startup .text.startup.*)
+    *(.text.hot .text.hot.*)
+    *(.text .stub .text.* .gnu.linkonce.t.*)
+    /* .gnu.warning sections are handled specially by elf32.em.  */
+    *(.gnu.warning)
+  }
+  .fini           :
+  {
+    /*KEEP (*(SORT_NONE(.fini)))*/
+    KEEP (*(.fini))
+  }
+  PROVIDE (__etext = .);
+  PROVIDE (_etext = .);
+  PROVIDE (etext = .);
+  . = ALIGN(64 / 8);
+  .safestack_metadata :
+  {
+    *(.safestack_metadata .safestack_metadata*)
+  }
   _end = .; PROVIDE (end = .);
   . = DATA_SEGMENT_END (.);
   /* Stabs debugging sections.  */

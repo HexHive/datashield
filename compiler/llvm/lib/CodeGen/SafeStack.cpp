@@ -303,6 +303,11 @@ bool SafeStack::IsSafeStackAlloca(const Value *AllocaPtr, uint64_t AllocaSize) {
         }
 
         if (const MemIntrinsic *MI = dyn_cast<MemIntrinsic>(I)) {
+          // Passing a safe stack allocation to memcpy results in __ds_metadata_copy
+          // being invoked, which is not currently supported.  To support that,
+          // we would need to be able to compute the bounds of safe stack allocations
+          // when creating the invocation of __ds_metadata_copy.
+          return false;
           if (!IsMemIntrinsicSafe(MI, UI, AllocaPtr, AllocaSize)) {
             DEBUG(dbgs() << "[SafeStack] Unsafe alloca: " << *AllocaPtr
                          << "\n            unsafe memintrinsic: " << *I
@@ -545,8 +550,10 @@ Value *SafeStack::moveStaticAllocasToUnsafeStack(
 
     Value *Off = IRB.CreateGEP(BasePointer, // BasePointer is i8*
                                ConstantInt::get(Int32Ty, -Offset));
+    // The DataShield pass needs to know the size of the allocation, so
+    // we encode it in the name:
     Value *NewArg = IRB.CreateBitCast(Off, Arg->getType(),
-                                     Arg->getName() + ".unsafe-byval");
+                                     Twine(Arg->getName()) + ".sz-" + Twine(Size) + ".unsafe-byval");
 
     // Replace alloc with the new location.
     replaceDbgDeclare(Arg, BasePointer, BasePointer->getNextNode(), DIB,
@@ -570,7 +577,10 @@ Value *SafeStack::moveStaticAllocasToUnsafeStack(
 
     // Replace uses of the alloca with the new location.
     // Insert address calculation close to each use to work around PR27844.
-    std::string Name = std::string(AI->getName()) + ".unsafe";
+    std::string Name(AI->getName());
+    Name += ".sz-";
+    Name += Twine(Size).str();
+    Name += ".unsafe";
     while (!AI->use_empty()) {
       Use &U = *AI->use_begin();
       Instruction *User = cast<Instruction>(U.getUser());
@@ -652,8 +662,12 @@ void SafeStack::moveDynamicAllocasToUnsafeStack(
       IRB.CreateStore(NewTop, DynamicTop);
 
     Value *NewAI = IRB.CreatePointerCast(NewTop, AI->getType());
+    assert(isa<Instruction>(NewAI) && "DataShield requires that this be an instruction");
     if (AI->hasName() && isa<Instruction>(NewAI))
       NewAI->takeName(AI);
+    else
+      NewAI->setName("unnamed");
+    NewAI->setName(NewAI->getName() + ".safestack-new-dyn-alloc");
 
     replaceDbgDeclareForAlloca(AI, NewAI, DIB, /*Deref=*/true);
     AI->replaceAllUsesWith(NewAI);

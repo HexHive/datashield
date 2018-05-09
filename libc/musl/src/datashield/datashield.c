@@ -20,12 +20,20 @@
 //
 //
 
+#define MMAP_START (0xfe00000)
+#define PAGE_COUNT (256)
+#define PAGE_SIZE (4096)
+char bitMap[PAGE_COUNT] = {'0'};
+
 typedef struct {void *base, *last;} __ds_bounds_t;
 typedef struct {
   //void *ptrAddr;
   __ds_bounds_t bounds;
 } __ds_table_entry;
 
+static inline bool __ds_bounds_equal(__ds_bounds_t a, __ds_bounds_t b) {
+	return a.base == b.base && a.last == b.last;
+}
 
 #ifdef DEBUG_MODE
 #define DEBUG(...) (fprintf(stderr, "[DC Runtime] " __VA_ARGS__))
@@ -37,12 +45,14 @@ typedef struct {
 #endif
 
 #define __CTYPE_B_LOC_SIZE (384)
-#define BOUNDARY ((1ull << 32) - 1)
+#define BOUNDARY ((1ull << 28) - 1)
 #define PAD (4096)
 #define UNSAFE_STACK_SIZE (1024*8192)
 #define UNSAFE_STACK_HINT (BOUNDARY - PAD - UNSAFE_STACK_SIZE)
 
-#define UNSAFE_HEAP_SIZE (1ull << 31)
+extern int __unsafe_heap_start, __unsafe_heap_end;
+
+#define UNSAFE_HEAP_SIZE (((size_t)&__unsafe_heap_end) - (size_t)&__unsafe_heap_start)
 
 #define SAFE_HEAP_SIZE (1ull << 32ull)
 #define METADATA_TABLE_SIZE (2ull*SAFE_HEAP_SIZE)
@@ -57,12 +67,12 @@ typedef struct {
 
 
 //void* unsafe_stack_bottom;
-void* unsafe_heap;
+void* unsafe_heap = &__unsafe_heap_start;
 void* safe_heap;
 mspace unsafe_region, safe_region;
 //size_t __ds_table_count = 0;
 size_t __ds_num_masks = 0;
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 size_t __ds_num_bounds_checks = 0;
 size_t __ds_num_safe_heap_allocs = 0;
 size_t __ds_num_unsafe_heap_allocs = 0;
@@ -80,10 +90,25 @@ __ds_table_entry *__ds_table = 0;
 
 __ds_bounds_t __ds_fn_args_array[N_ARG_ENTRIES]; // TODO allocate this in the safe region
 
-//__attribute__((visibility("default")))
-//char** __ds_environ;
+__ds_bounds_t __ds_fn_varargs_stack[N_ARG_ENTRIES]; // TODO allocate this in the safe region
+
+static size_t __ds_fn_vararg_count = 0;
+
+__attribute__((visibility("default")))
+char** __ds_safe_environ;
+
+__attribute__((visibility("default")))
+char** __ds_unsafe_environ;
+
+__attribute__((visibility("default"), used))
+__ds_bounds_t __ds_get_fn_arg_bounds_debug(size_t i, char* msg, size_t id);
+
+__attribute__((visibility("default"), used))
+void __ds_metadata_copy_debug(unsigned char* dst, unsigned char* src, size_t size, size_t id);
 
 void __ds_debug_bounds_sanity_check(__ds_bounds_t bounds) {
+	// we now support infinite bounds starting at 0, so these checks are disabled.
+#if 0
   // the only valid bounds values are empty (for null pointers)
   // and somewhere within the safe region
   if ((bounds.base < (void*)BOUNDARY || bounds.last < (void*)BOUNDARY)
@@ -91,11 +116,18 @@ void __ds_debug_bounds_sanity_check(__ds_bounds_t bounds) {
     fprintf(stderr, "invalid bounds value found!\n");
     assert(0);
   }
+#endif
 }
 
-size_t __ds_hash(void* ptr) {
+size_t __ds_hash(void* ptr, bool *in_safe_region) {
   DEBUG("ptr: %p\n", ptr);
-  DEBUG_ASSERT((size_t)ptr >= BOUNDARY);
+  //DEBUG_ASSERT((size_t)ptr >= BOUNDARY);
+  if ((size_t)ptr < BOUNDARY) {
+	  *in_safe_region = false;
+	  return 0;
+  } else {
+	  *in_safe_region = true;
+  }
   size_t hash = 0;
   if (ptr < __ds_table) {
       hash = ((size_t) ptr - BOUNDARY) / 8;
@@ -106,11 +138,14 @@ size_t __ds_hash(void* ptr) {
       //size_t hash = ((size_t) __ds_table - (size_t)ptr ) / 8 ;
   }
   DEBUG("hash: %lu\n", hash);
-  DEBUG_ASSERT(hash < N_TABLE_ENTRIES);
+  if(N_TABLE_ENTRIES <= hash) {
+	  *in_safe_region = false;
+	  return ~(size_t)0;
+  }
   return hash;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_set_fn_arg_bounds_debug(size_t i, __ds_bounds_t bounds, const char* msg) {
   DEBUG("(set fn arg) @ %lu <= [%p, %p] from: %s\n", i, bounds.base, bounds.last, msg);
 #ifdef DEBUG_MODE
@@ -120,7 +155,7 @@ void __ds_set_fn_arg_bounds_debug(size_t i, __ds_bounds_t bounds, const char* ms
 }
 
 // mallocs
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_unsafe_malloc(size_t n) {
 #ifdef DEBUG_MODE
   ++__ds_num_unsafe_heap_allocs;
@@ -130,32 +165,35 @@ void* __ds_unsafe_malloc(size_t n) {
   DEBUG("unsafe malloc: %li@%p\n", n, ptr);
   return ptr;
 }
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_safe_malloc(size_t n) {
 #ifdef DEBUG_MODE
   ++__ds_num_safe_heap_allocs;
 #endif
   void* ptr = mspace_malloc(safe_region, n);
+  memset(ptr, 0, n);
   DEBUG("safe malloc: %li@%p\n", n, ptr);
   return ptr;
 }
- __attribute__((visibility("default")))
+ __attribute__((visibility("default"), used))
 void* __ds_debug_safe_malloc(size_t n, char* msg, size_t id) {
   ++__ds_num_safe_heap_allocs;
   void* ptr = mspace_malloc(safe_region, n);
+  memset(ptr, 0, n);
   DEBUG("safe malloc: %li@%p. from: %s. ID: %li\n", n, ptr, msg, id);
   return ptr;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_debug_safe_alloc(size_t n, size_t id) {
   void* ptr = mspace_malloc(safe_region, n);
+  memset(ptr, 0, n);
   DEBUG("safe alloc: %li@%p. ID: %li\n", n, ptr, id);
   return ptr;
 }
 
 // frees
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_unsafe_free(void* ptr) {
   // we might have garbage in the upper bits when using prefixing
   //ptr = (void*) ((size_t)(ptr) & ((1ull << 32) - 1));
@@ -164,7 +202,7 @@ void __ds_unsafe_free(void* ptr) {
   mspace_free(unsafe_region, ptr);
 }
 // frees
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_safe_free(void* ptr) {
   DEBUG("safe free: %p\n", ptr);
   if (ptr == 0) { return; }
@@ -172,7 +210,7 @@ void __ds_safe_free(void* ptr) {
   mspace_free(safe_region, ptr);
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_safe_free_debug(void* ptr, size_t id) {
   DEBUG("safe free: %p.  ID:%li \n", ptr, id);
   if (ptr == 0) { return; } // it's valid to call free on a nullptr (nothing happens)
@@ -180,7 +218,7 @@ void __ds_safe_free_debug(void* ptr, size_t id) {
   mspace_free(safe_region, ptr);
 }
 
- __attribute__((visibility("default")))
+ __attribute__((visibility("default"), used))
 void __ds_safe_dealloc(void* ptr, size_t id) {
   DEBUG("safe dealloc: %p. ID: %li\n", ptr, id);
   if (ptr == 0) { return; } // it's valid to call free on a nullptr (nothing happens)
@@ -189,7 +227,7 @@ void __ds_safe_dealloc(void* ptr, size_t id) {
 }
 
 // callocs
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_unsafe_calloc(size_t n, size_t elem_size) {
 #ifdef DEBUG_MODE
   ++__ds_num_unsafe_heap_allocs;
@@ -198,25 +236,27 @@ void* __ds_unsafe_calloc(size_t n, size_t elem_size) {
   DEBUG("unsafe calloc: %lix%li@%p\n", n, elem_size, ptr);
   return ptr;
 }
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_safe_calloc(size_t n, size_t elem_size) {
 #ifdef DEBUG_MODE
   ++__ds_num_safe_heap_allocs;
 #endif
   void* ptr = mspace_calloc(safe_region, n, elem_size);
+  memset(ptr, 0, n * elem_size);
   DEBUG("safe calloc: %lix%li@%p\n", n, elem_size, ptr);
   return ptr;
 }
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_debug_safe_calloc(size_t n, size_t elem_size, char* msg) {
   ++__ds_num_safe_heap_allocs;
   void* ptr = mspace_calloc(safe_region, n, elem_size);
+  memset(ptr, 0, n * elem_size);
   DEBUG("safe calloc: %lix%li@%p. from: %s\n", n, elem_size, ptr, msg);
   return ptr;
 }
 
 // reallocs
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_unsafe_realloc(void* ptr, size_t n) {
 #ifdef DEBUG_MODE
   ++__ds_num_unsafe_heap_allocs;
@@ -226,19 +266,29 @@ void* __ds_unsafe_realloc(void* ptr, size_t n) {
   DEBUG("unsafe realloc: %p:%li => %p\n", ptr, n, new_ptr);
   return new_ptr;
 }
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_safe_realloc(void* ptr, size_t n) {
 #ifdef DEBUG_MODE
   ++__ds_num_safe_heap_allocs;
 #endif
+  char *msg = "__ds_safe_realloc";
+  __ds_bounds_t bounds = __ds_get_fn_arg_bounds_debug(1, msg, 0);
+  size_t oldSize = (unsigned)bounds.last - (unsigned)bounds.base + 1;
+
   DEBUG("safe realloc requested: @%p x %li\n", ptr, n);
   void* new_ptr = mspace_realloc(safe_region, ptr, n);
   DEBUG("safe realloc: %p:%li => %p\n", ptr, n, new_ptr);
+  
+  // copy meta data
+  if (ptr != NULL && new_ptr != NULL && new_ptr != ptr && n != 0) {
+    __ds_metadata_copy_debug(new_ptr, ptr, oldSize > n ? n : oldSize, 0);
+  }
+
   return new_ptr;
 }
 
 // strdups
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 char* __ds_unsafe_strdup(char* orig) {
   int n = strlen(orig);
   char *dup = (char *)__ds_unsafe_malloc(n);
@@ -249,7 +299,7 @@ char* __ds_unsafe_strdup(char* orig) {
 #endif
   return dup;
 } 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 char* __ds_safe_strdup(char* orig) {
   // TODO fix these bounds!!
   //char const * where = "__dc_unsafe_strdup";
@@ -297,18 +347,18 @@ char* __ds_safe_strdup(char* orig) {
 //  return safe;
 //}
 //
-//// init functions
-//__attribute__((visibility("default")))
-//char** __ds_copy_argv_to_unsafe_heap(int argc, char** argv) {
-//  char** newArgv = (char**)__ds_unsafe_malloc(sizeof(char**)*(argc+1));
-//  newArgv[argc] = 0;
-//  for (int i = 0; i < argc; ++i) {
-//    int sz = strlen(argv[i])+1;
-//    newArgv[i] = (char*)__ds_unsafe_malloc(sz);
-//    strncpy(newArgv[i], argv[i], sz);
-//  }
-//  return newArgv;
-//}
+// init functions
+__attribute__((visibility("default")))
+char** __ds_copy_argv_to_unsafe_heap(int argc, char** argv) {
+  char** newArgv = (char**)__ds_unsafe_malloc(sizeof(char**)*(argc+1));
+  newArgv[argc] = 0;
+  for (int i = 0; i < argc; ++i) {
+    int sz = strlen(argv[i])+1;
+    newArgv[i] = (char*)__ds_unsafe_malloc(sz);
+    strncpy(newArgv[i], argv[i], sz);
+  }
+  return newArgv;
+}
 //__attribute__((visibility("default")))
 //int __ds_get_exit_code_from_status(int status) {
 //  if (WIFSIGNALED(status)) {
@@ -346,7 +396,7 @@ char* __ds_safe_strdup(char* orig) {
 //  return WEXITSTATUS(status);
 //}
 //
-//__attribute__((visibility("default")))
+//__attribute__((visibility("default"), used))
 void* __ds_unsafe_mmap(void* addr, size_t length, int prot, int flags,
     int fd, off_t offset) {
   DEBUG("addr: %p\n", addr);
@@ -355,11 +405,68 @@ void* __ds_unsafe_mmap(void* addr, size_t length, int prot, int flags,
   DEBUG("flags: %i\n", flags);
   DEBUG("fd: %i\n", flags);
   DEBUG("offset: %li\n", offset);
-  void* rv =  mmap(addr, length, prot, flags | MAP_32BIT, fd, offset);
+
+  static int count = 0;
+  void* rv = MAP_FAILED;
+
+  if (count == 0) {
+    fprintf(stderr, "first mmap, call munmap\n");
+    int result = munmap((void *)MMAP_START, PAGE_COUNT*PAGE_SIZE);
+    count = 1;
+  }
+
+  unsigned numPage = length / PAGE_SIZE;
+  if (length % PAGE_SIZE != 0)
+    numPage++;
+
+  if (numPage > PAGE_COUNT) {
+    fprintf(stderr, "no available pages for mmap\n");
+    return rv;
+  }
+  int i = 0, j;
+  while (i < PAGE_COUNT - numPage + 1) {
+    for (j = 0; j < numPage; j++) {
+      if (bitMap[i+j] == '1')
+        break;
+    }
+    if (j == numPage)
+      //found available space
+      break;
+    i = i + j + 1;
+  }
+  if (i >= PAGE_COUNT - numPage + 1) {
+    fprintf(stderr, "no available pages for mmap");
+    return rv;
+  }
+
+  addr = MMAP_START + PAGE_SIZE*i;
+  rv =  mmap(addr, length, prot, flags | MAP_32BIT, fd, offset);
   if (rv == MAP_FAILED) {
     DEBUG("ERROR: %d - %s\n", errno, strerror(errno));
   }
+  else {
+    assert(rv == addr && "mmap should take hint");
+    for (j = 0; j < numPage; j++)
+      bitMap[i+j] = '1';
+  }
   return rv;
+}
+
+int __ds_unsafe_munmap(void* addr, size_t length) {
+  int result = munmap(addr, length);
+  if (result == 0) {
+    unsigned index = ((unsigned)addr - MMAP_START) / PAGE_SIZE;
+    unsigned numPage = length / PAGE_SIZE;
+    if (length % PAGE_SIZE != 0)
+      numPage++;
+    assert(index + numPage <= PAGE_COUNT && "unsafe mmap out of bound");
+    for (int j = 0; j < numPage; j++)
+      bitMap[index+j] = '0';
+  }
+  else {
+    fprintf(stderr, "munmap failed\n");
+  }
+  return result;
 }
 
 //__attribute__((visibility("default")))
@@ -402,10 +509,15 @@ void* __ds_unsafe_mmap(void* addr, size_t length, int prot, int flags,
 //}
 //
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 __ds_bounds_t __ds_get_bounds_debug(void* ptrAddr, char* msg, size_t id) {
   DEBUG("(get bounds: %li) @ %p => ", id, ptrAddr);
-  size_t hash = __ds_hash(ptrAddr);
+  if (__ds_table == 0)
+	  return __ds_infinite_bounds;
+  bool in_safe_region;
+  size_t hash = __ds_hash(ptrAddr, &in_safe_region);
+  if (!in_safe_region)
+	  return __ds_infinite_bounds;
   __ds_bounds_t bounds = __ds_table[hash].bounds;
   DEBUG("[%p,%p)  from : %s.\n", bounds.base, bounds.last,  msg, id);
 #ifdef DEBUG_MODE
@@ -415,10 +527,13 @@ __ds_bounds_t __ds_get_bounds_debug(void* ptrAddr, char* msg, size_t id) {
   //return __ds_invalid_bounds; // not found
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 __ds_bounds_t __ds_get_fn_arg_bounds_debug(size_t i, char* msg, size_t id) {
+	  if (__ds_table == 0)
+		  return __ds_infinite_bounds;
   __ds_bounds_t bounds = __ds_fn_args_array[i];
   DEBUG("(get fn args ID:%li) @ %li => [%p, %p). from: %s\n", id, i, bounds.base, bounds.last, msg);
+#if 0
 #ifdef DEBUG_MODE
   if (bounds.base == __ds_invalid_bounds.base && bounds.last == __ds_invalid_bounds.last) {
     fprintf(stderr, "we get the same fn arg bounds twice with out setting!\n");
@@ -426,21 +541,31 @@ __ds_bounds_t __ds_get_fn_arg_bounds_debug(size_t i, char* msg, size_t id) {
   }
 #endif
   __ds_fn_args_array[i] = __ds_invalid_bounds;
+#else
+  // It is sometimes the case that a non-sensitive parameter (e.g. a string constant) is passed
+  // to a function argument that is treated as sensitive.  In that case, the bounds for the
+  // unsafe region should be used.
+  __ds_fn_args_array[i] = __ds_unsafe_region_bounds;
+#endif
   return bounds;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_set_bounds_debug(void *ptrAddr, __ds_bounds_t bounds, const char* msg, size_t id)
 {
   DEBUG("(set bounds) @ %p <= [%p, %p]. ID: %li. from: %s\n", ptrAddr, (void*)bounds.base, (void*)bounds.last, id, msg);
+  if (__ds_table == 0)
+	  return;
 #ifdef DEBUG_MODE
   __ds_debug_bounds_sanity_check(bounds);
 #endif
-  size_t hash = __ds_hash(ptrAddr);
-  __ds_table[hash].bounds = bounds;
+  bool in_safe_region;
+  size_t hash = __ds_hash(ptrAddr, &in_safe_region);
+  if (in_safe_region)
+	  __ds_table[hash].bounds = bounds;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 //__attribute__((constructor(0)))
 void __ds_init() {
   //unsafe_stack_bottom = mmap((void*)UNSAFE_STACK_HINT,
@@ -459,6 +584,8 @@ void __ds_init() {
   //  DEBUG("unsafe stack bottom: %p\n", (char*)unsafe_stack_bottom);
   //}
 
+#if 0
+  // unsafe heap is now allocated statically by linker script.
   size_t UNSAFE_HEAP_HINT = UNSAFE_STACK_HINT - PAD - UNSAFE_HEAP_SIZE;
   unsafe_heap = mmap((void*)UNSAFE_HEAP_HINT,
                       UNSAFE_HEAP_SIZE,
@@ -473,6 +600,7 @@ void __ds_init() {
     assert((size_t)unsafe_heap+UNSAFE_HEAP_SIZE < BOUNDARY);
     DEBUG("unsafe heap top: %p\n", (char*)unsafe_heap + UNSAFE_HEAP_SIZE);
   }
+#endif
 
   unsafe_region = create_mspace_with_base(unsafe_heap, UNSAFE_HEAP_SIZE, 0);
 
@@ -487,12 +615,14 @@ void __ds_init() {
     fprintf(stderr, "mapping failed!\n");
     assert(0);
   }
+  assert(BOUNDARY < safe_heap);
   safe_region = create_mspace_with_base(safe_heap, SAFE_HEAP_SIZE, 0);
 
-  __ds_table = (__ds_table_entry*) __ds_safe_malloc(sizeof(__ds_table_entry) * N_TABLE_ENTRIES);
-
+  // This may be invoked too early to make use of __ds_safe_malloc.
+  __ds_table = (__ds_table_entry*) mspace_malloc(safe_region, sizeof(__ds_table_entry) * N_TABLE_ENTRIES);
+  //__ds_table = (__ds_table_entry*) __ds_safe_malloc(sizeof(__ds_table_entry) * N_TABLE_ENTRIES);
 }
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_abort_debug(__ds_bounds_t bounds, void* ptr, void* bottom, char* msg, size_t id) {
   fprintf(stderr, "ABORTING! ID: %li from: %s\n", id, msg);
   void* base = bounds.base;
@@ -506,7 +636,7 @@ void __ds_abort_debug(__ds_bounds_t bounds, void* ptr, void* bottom, char* msg, 
   abort();
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_metadata_copy_debug(unsigned char* dst, unsigned char* src, size_t size, size_t id) {
   // when we call memcpy on a struct, we need to copy the member pointer bounds as well
   // we only care about copying pointers
@@ -515,8 +645,11 @@ void __ds_metadata_copy_debug(unsigned char* dst, unsigned char* src, size_t siz
   //if ((size_t)src < BOUNDARY) { return; }
   size_t n_ptrs = size/sizeof(void*);
   for (size_t i = 0; i < n_ptrs; ++i) {
-    size_t dst_hash = __ds_hash((void*)(dst+i*sizeof(void*)));
-    size_t src_hash = __ds_hash((void*)(src+i*sizeof(void*)));
+	  bool in_safe_region;
+    size_t dst_hash = __ds_hash((void*)(dst+i*sizeof(void*)), &in_safe_region);
+    assert(in_safe_region);
+    size_t src_hash = __ds_hash((void*)(src+i*sizeof(void*)), &in_safe_region);
+    assert(in_safe_region);
     DEBUG("dst hash: %li, src hash: %li\n", dst_hash, src_hash);
     assert(dst_hash > 0);
     assert(src_hash > 0);
@@ -535,7 +668,7 @@ void __ds_metadata_copy_debug(unsigned char* dst, unsigned char* src, size_t siz
 
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_metadata_copy(unsigned char* dst, unsigned char* src, size_t size) {
   // when we call memcpy on a struct, we need to copy the member pointer bounds as well
   // we only care about copying pointers
@@ -544,8 +677,11 @@ void __ds_metadata_copy(unsigned char* dst, unsigned char* src, size_t size) {
   //if ((size_t)src < BOUNDARY) { return; }
   size_t n_ptrs = size/sizeof(void*);
   for (size_t i = 0; i < n_ptrs; ++i) {
-    size_t dst_hash = __ds_hash((void*)(dst+i*sizeof(void*)));
-    size_t src_hash = __ds_hash((void*)(src+i*sizeof(void*)));
+	  bool in_safe_region;
+    size_t dst_hash = __ds_hash((void*)(dst+i*sizeof(void*)), &in_safe_region);
+    assert(in_safe_region);
+    size_t src_hash = __ds_hash((void*)(src+i*sizeof(void*)), &in_safe_region);
+    assert(in_safe_region);
     assert(dst_hash > 0);
     assert(src_hash > 0);
     assert(dst_hash < N_TABLE_ENTRIES);
@@ -563,45 +699,84 @@ void __ds_metadata_copy(unsigned char* dst, unsigned char* src, size_t size) {
   return;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_safe_memcpy(unsigned char* dst, unsigned char* src, size_t size) {
   memcpy(dst, src, size);
   __ds_metadata_copy(dst, src, size);
 }
 
 // non debug bounds functions
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_set_fn_arg_bounds(size_t i, __ds_bounds_t bounds) {
   __ds_fn_args_array[i] = bounds;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 __ds_bounds_t __ds_get_fn_arg_bounds(size_t i) {
+	if (__ds_table == 0)
+		return __ds_infinite_bounds;
   __ds_bounds_t b = __ds_fn_args_array[i];
   __ds_fn_args_array[i] = __ds_unsafe_region_bounds;
   return b;
 }
 
-__attribute__((visibility("default")))
+// This API assumes that every variadic function fully processes all
+// arguments supplied to it.
+__attribute__((visibility("default"), used))
+void __ds_push_fn_vararg_bounds(__ds_bounds_t bounds) {
+	DEBUG("push vararg bounds @ %d: [%p, %p)\n", __ds_fn_vararg_count, bounds.base, bounds.last);
+	if (__ds_fn_vararg_count == N_ARG_ENTRIES) {
+    fprintf(stderr, "stack overflow of vararg bounds\n");
+    abort();
+  }
+  __ds_fn_varargs_stack[__ds_fn_vararg_count++] = bounds;
+}
+
+__attribute__((visibility("default"), used))
+__ds_bounds_t __ds_pop_fn_vararg_bounds() {
+  if (__ds_fn_vararg_count == 0) {
+    fprintf(stderr, "empty queue of vararg bounds\n");
+    abort();
+  }
+  DEBUG("pop vararg bounds @ %d: [%p, %p)\n", __ds_fn_vararg_count-1, __ds_fn_varargs_stack[__ds_fn_vararg_count-1].base, __ds_fn_varargs_stack[__ds_fn_vararg_count-1].last);
+  return __ds_fn_varargs_stack[--__ds_fn_vararg_count];
+}
+
+__attribute__((visibility("default"), used))
+void __ds_pop_fn_remaining_vararg_bounds() {
+  do {
+	assert(__ds_fn_vararg_count != 0);
+    DEBUG("pop remaining vararg bounds @ %d: [%p, %p)\n", __ds_fn_vararg_count-1, __ds_fn_varargs_stack[__ds_fn_vararg_count-1].base, __ds_fn_varargs_stack[__ds_fn_vararg_count-1].last);
+  } while (!__ds_bounds_equal(__ds_fn_varargs_stack[--__ds_fn_vararg_count], __ds_invalid_bounds));
+}
+
+__attribute__((visibility("default"), used))
 __ds_bounds_t __ds_get_bounds(void* ptrAddr) {
-  size_t hash = __ds_hash(ptrAddr);
+	if (__ds_table == 0)
+		return __ds_infinite_bounds;
+	  bool in_safe_region;
+	  size_t hash = __ds_hash(ptrAddr, &in_safe_region);
+	  if (!in_safe_region)
+		  return __ds_infinite_bounds;
   __ds_bounds_t bounds = __ds_table[hash].bounds;
   return bounds;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_set_bounds(void *ptrAddr, __ds_bounds_t bounds) {
-  size_t hash = __ds_hash(ptrAddr);
-  //__ds_table[hash].ptrAddr = ptrAddr;
-  __ds_table[hash].bounds = bounds;
+	  bool in_safe_region;
+	  size_t hash = __ds_hash(ptrAddr, &in_safe_region);
+	  if (in_safe_region) {
+        __ds_table[hash].bounds = bounds;
+      }
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_abort() {
   abort();
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void* __ds_mask_debug(void* ptr, size_t id) {
     if ((unsigned long long)ptr > BOUNDARY) {
         fprintf(stderr, "we tried to mask a sensitive pointer? %p. id: %li\n", ptr, id);
@@ -722,7 +897,7 @@ void* __ds_mask_debug(void* ptr, size_t id) {
 //  return repl;
 //}
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_bounds_check_debug(void* ptr, __ds_bounds_t bounds, const char* msg, size_t id) {
   DEBUG("(bounds check: %li) %p <= %p < %p?\n", id, bounds.base, ptr, bounds.last);
   ++__ds_num_bounds_checks;
@@ -751,7 +926,7 @@ void __ds_bounds_check_debug(void* ptr, __ds_bounds_t bounds, const char* msg, s
 //  return newArgv;
 //}
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 void __ds_print_runtime_stats() {
   fprintf(stderr, "# masks: %lu\n", __ds_num_masks);
   fprintf(stderr, "# bounds checks: %lu\n", __ds_num_bounds_checks);
@@ -874,12 +1049,28 @@ int __ds_safe_gettimeofday(struct timeval *tv, struct timezone *tz) {
   return 0;
 }
 
+__attribute__((section(".sensitive2")))
+static struct tm sens_tm;
+
+struct tm *__ds_safe_gmtime(time_t *in) {
+  struct tm* orig_tm = gmtime(in);
+  memcpy(&sens_tm, orig_tm, sizeof(*orig_tm));
+  
+  __ds_bounds_t sens_tm_bounds;
+  sens_tm_bounds.base = &sens_tm;
+  sens_tm_bounds.last = ((uintptr_t)sens_tm_bounds.base) + sizeof(sens_tm) - 1;
+  __ds_set_fn_arg_bounds(0, sens_tm_bounds);
+  
+  return &sens_tm;
+}
+
 void* __ds_debug_safe_memalign(size_t alignment, size_t bytes, char* msg, size_t id) {
   void* ptr =  mspace_memalign(safe_region, alignment, bytes);
   DEBUG("safe memalign: %lix%li@%p. from: %s. ID: %li\n", alignment, bytes, ptr, msg, id);
   return ptr;
 }
 
+__attribute__((visibility("default"), used))
 char** __ds_copy_argv_to_safe_heap(int argc, char** argv) {
   char** newArgv = (char**)__ds_safe_malloc(sizeof(char**)*(argc+1));
   __ds_bounds_t argv_bounds;
@@ -902,7 +1093,7 @@ char** __ds_copy_argv_to_safe_heap(int argc, char** argv) {
   return newArgv;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 char** __ds_copy_environ_to_safe(char** origenviron) {
   DEBUG("(copy environ): %p\n", origenviron);
   int n = 0;
@@ -923,8 +1114,8 @@ char** __ds_copy_environ_to_safe(char** origenviron) {
     newenviron[i] = (char*)__ds_safe_malloc(n);
     strcpy(newenviron[i], origenviron[i]);
     ele_bounds.base = newenviron[i];
-    ele_bounds.last = newenviron[i] + n;
-  __ds_set_bounds(newenviron[i], ele_bounds);
+    ele_bounds.last = newenviron[i] + n;  
+    __ds_set_bounds(&newenviron[i], ele_bounds);
   }
   for (int i = 0; i < n; ++i) {
     DEBUG("%s\n", newenviron[i]);
@@ -933,7 +1124,7 @@ char** __ds_copy_environ_to_safe(char** origenviron) {
   return newenviron;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), used))
 char**  __ds_copy_environ_to_unsafe(char** origenviron) {
   DEBUG("(copy environ): %p\n", origenviron);
   int n = 0;

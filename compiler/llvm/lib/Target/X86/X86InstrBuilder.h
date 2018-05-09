@@ -109,9 +109,11 @@ static inline X86AddressMode getAddressFromInstr(const MachineInstr *MI,
   AM.IndexReg = Op2.getReg();
 
   const MachineOperand &Op3 = MI->getOperand(Operand + 3);
-  if (Op3.isGlobal())
+  // FIXME: Handle additional types of memory references below.
+  if (Op3.isGlobal()) {
     AM.GV = Op3.getGlobal();
-  else
+    AM.Disp = Op3.getOffset();
+  } else
     AM.Disp = Op3.getImm();
 
   return AM;

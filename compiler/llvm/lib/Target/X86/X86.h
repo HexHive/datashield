@@ -94,6 +94,11 @@ FunctionPass *createX86EvexToVexInsts();
 
 void initializeEvexToVexInstPassPass(PassRegistry &);
 
+/// Return a pass that combines redundant bounds checks inserted by the
+/// DataShield pass.
+FunctionPass *createX86SafeStackBoundsCheckingCombinerPass();
+
+void initializeX86SafeStackBoundsCheckingCombinerPass(PassRegistry&);
 } // End llvm namespace
 
 #endif

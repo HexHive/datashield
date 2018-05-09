@@ -160,6 +160,12 @@ SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalObject *GO,
       return SectionKind::getBSS();
   }
 
+  StringRef name1(".sensitive4");
+  if (name1 == GVar->getSection()) {
+    return SectionKind::getData();
+  }
+
+
   // Variables with common linkage always get classified as common.
   if (GVar->hasCommonLinkage())
     return SectionKind::getCommon();

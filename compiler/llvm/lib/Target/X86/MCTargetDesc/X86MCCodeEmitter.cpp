@@ -36,10 +36,16 @@ class X86MCCodeEmitter : public MCCodeEmitter {
   MCContext &Ctx;
 public:
   X86MCCodeEmitter(const MCInstrInfo &mcii, MCContext &ctx)
-    : MCII(mcii), Ctx(ctx) {
+    : MCII(mcii), Ctx(ctx), YolkRef("") {
   }
 
   ~X86MCCodeEmitter() override {}
+
+  std::string YolkRef;
+  void setYolkRef(const std::string name) override {
+    assert(YolkRef.empty() && "YolkRef should be taken care of");
+    YolkRef.assign(name);
+  }
 
   bool is64BitMode(const MCSubtargetInfo &STI) const {
     return STI.getFeatureBits()[X86::Mode64Bit];
@@ -130,7 +136,7 @@ public:
 
   void encodeInstruction(const MCInst &MI, raw_ostream &OS,
                          SmallVectorImpl<MCFixup> &Fixups,
-                         const MCSubtargetInfo &STI) const override;
+                         const MCSubtargetInfo &STI) override;
 
   void EmitVEXOpcodePrefix(uint64_t TSFlags, unsigned &CurByte, int MemOperand,
                            const MCInst &MI, const MCInstrDesc &Desc,
@@ -1154,7 +1160,7 @@ bool X86MCCodeEmitter::emitOpcodePrefix(uint64_t TSFlags, unsigned &CurByte,
 void X86MCCodeEmitter::
 encodeInstruction(const MCInst &MI, raw_ostream &OS,
                   SmallVectorImpl<MCFixup> &Fixups,
-                  const MCSubtargetInfo &STI) const {
+                  const MCSubtargetInfo &STI) {
   unsigned Opcode = MI.getOpcode();
   const MCInstrDesc &Desc = MCII.get(Opcode);
   uint64_t TSFlags = Desc.TSFlags;
@@ -1511,6 +1517,23 @@ encodeInstruction(const MCInst &MI, raw_ostream &OS,
       EmitImmediate(MI.getOperand(CurOp++), MI.getLoc(),
                     X86II::getSizeOfImm(TSFlags), getImmFixupKind(TSFlags),
                     CurByte, OS, Fixups);
+      // yolk relocation
+      if (!YolkRef.empty()) {
+        MCFixupKind FixupKind;
+        unsigned Offset;
+        unsigned Size = X86II::getSizeOfImm(TSFlags);
+        assert(Size == 4 || Size == 8);
+        if (Size == 4) {
+          FixupKind = MCFixupKind(X86::reloc_yolk_4byte);
+          Offset = CurByte - 4;
+        }
+        else {
+          FixupKind = MCFixupKind(X86::reloc_yolk_8byte);
+          Offset = CurByte - 8;
+        }
+        const MCExpr *Expr = MCSymbolRefExpr::create(Ctx.getOrCreateSymbol(YolkRef), MCSymbolRefExpr::VK_None, Ctx);
+        Fixups.push_back(MCFixup::create(Offset, Expr, FixupKind, MI.getLoc()));
+      }   
     }
   }
 
@@ -1526,4 +1549,8 @@ encodeInstruction(const MCInst &MI, raw_ostream &OS,
     abort();
   }
 #endif
+ 
+  if (!YolkRef.empty()) {
+    YolkRef.clear();
+  } 
 }

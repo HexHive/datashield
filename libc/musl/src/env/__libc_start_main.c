@@ -13,7 +13,7 @@
 #include "libc.h"
 #include "datashield.h"
 
-#define BOUNDARY ((1ull << 32) - 1)
+#define BOUNDARY ((1ull << 28) - 1)
 #define PAD (4096)
 #define STACK_SIZE (1024*8192)
 #define STACK_HINT (BOUNDARY - PAD - STACK_SIZE)
@@ -24,10 +24,16 @@ static void dummy(void) {}
 weak_alias(dummy, _init);
 
 __attribute__((__weak__, __visibility__("hidden")))
+extern void (*const __preinit_array_start)(void), (*const __preinit_array_end)(void);
+__attribute__((__weak__, __visibility__("hidden")))
 extern void (*const __init_array_start)(void), (*const __init_array_end)(void);
 
 static void dummy1(void *p) {}
 weak_alias(dummy1, __init_ssp);
+
+void __preinit_unsafe_stack(void);
+void __init_unsafe_stack(void);
+void __sep_stack_seg_init(int argc, char ***argvp, char ***envpp);
 
 #define AUX_CNT 38
 
@@ -48,6 +54,7 @@ void __init_libc(char **envp, char *pn)
 	}
 
 	__init_tls(aux);
+	__init_unsafe_stack();
 	__init_ssp((void *)aux[AT_RANDOM]);
 
 	if (aux[AT_UID]==aux[AT_EUID] && aux[AT_GID]==aux[AT_EGID]
@@ -67,8 +74,11 @@ void __init_libc(char **envp, char *pn)
 
 static void libc_start_init(void)
 {
+	uintptr_t a = (uintptr_t)&__preinit_array_start;
+	for (; a<(uintptr_t)&__preinit_array_end; a+=sizeof(void(*)()))
+		(*(void (**)())a)();
 	_init();
-	uintptr_t a = (uintptr_t)&__init_array_start;
+	a = (uintptr_t)&__init_array_start;
 	for (; a<(uintptr_t)&__init_array_end; a+=sizeof(void(*)()))
 		(*(void (**)())a)();
 }
@@ -116,13 +126,19 @@ int  __ds_unsafe_clone(void (*fn)(void*), void* arg) {
 }
 #endif
 
+__attribute__((no_sanitize("safe-stack")))
 int __libc_start_main(int (*main)(int,char **,char **), int argc, char **argv)
 {
 	char **envp = argv+argc+1;
 
+	__preinit_unsafe_stack();
 	__init_libc(envp, argv[0]);
 #ifdef __USE_DATASHIELD
   __ds_init();
+#endif
+
+// This block was removed when SafeStack support was added.
+#if 0
   void* stack_bottom = mmap((void*)STACK_HINT,
                             STACK_SIZE,
                             PROT_READ | PROT_WRITE,
@@ -146,11 +162,12 @@ int __libc_start_main(int (*main)(int,char **,char **), int argc, char **argv)
   //int status;
   //waitpid(pid, &status, 0); 
   exit(__ds_unsafe_clone(__change_stack_start_main, (void*)&args));
-#else
+#endif
+	__sep_stack_seg_init(argc, &argv, &envp);
 	__libc_start_init();
 	/* Pass control to the application */
 	exit(main(argc, argv, envp));
-#endif
+
 	return 0;
 }
 

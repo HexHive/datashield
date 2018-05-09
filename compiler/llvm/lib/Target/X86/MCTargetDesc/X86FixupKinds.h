@@ -30,6 +30,8 @@ enum Fixups {
                                              // of the instruction. Used only
                                              // for _GLOBAL_OFFSET_TABLE_.
   reloc_global_offset_table8,                // 64-bit variant.
+  reloc_yolk_4byte,                          // 32-bit yolk
+  reloc_yolk_8byte,                          // 64-bit yolk
   // Marker
   LastTargetFixupKind,
   NumTargetFixupKinds = LastTargetFixupKind - FirstTargetFixupKind

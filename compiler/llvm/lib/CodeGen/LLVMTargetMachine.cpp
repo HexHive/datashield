@@ -133,6 +133,8 @@ addPassesToGenerateCode(LLVMTargetMachine *TM, PassManagerBase &PM,
 
   PassConfig->addCodeGenPrepare();
 
+  PM.add(createDataShieldPass());
+
   PassConfig->addPassesToHandleExceptions();
 
   PassConfig->addISelPrepare();

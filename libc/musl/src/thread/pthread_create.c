@@ -10,6 +10,8 @@ void *__mmap(void *, size_t, int, int, int, off_t);
 int __munmap(void *, size_t);
 int __mprotect(void *, size_t, int);
 
+void __safestack_pthread_exit(struct pthread *self);
+
 static void dummy_0()
 {
 }
@@ -23,6 +25,8 @@ _Noreturn void __pthread_exit(void *result)
 {
 	pthread_t self = __pthread_self();
 	sigset_t set;
+
+	__safestack_pthread_exit(self);
 
 	self->canceldisable = 1;
 	self->cancelasync = 0;
@@ -176,6 +180,8 @@ static void init_file_lock(FILE *f)
 
 void *__copy_tls(unsigned char *);
 
+int __safestack_init_thread(struct pthread *restrict, const pthread_attr_t *restrict);
+
 int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict attrp, void *(*entry)(void *), void *restrict arg)
 {
 	int ret, c11 = (attrp == __ATTRP_C11_THREAD);
@@ -269,9 +275,15 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 	new->robust_list.head = &new->robust_list.head;
 	new->unblock_cancel = self->cancel;
 	new->CANARY = self->CANARY;
+	ret = __safestack_init_thread(new, &attr);
+	if (ret != 0) {
+		if (map) __munmap(map, size);
+		__release_ptc();
+		return ret;
+	}
 
 	a_inc(&libc.threads_minus_1);
-	ret = __clone((c11 ? start_c11 : start), stack, flags, new, &new->tid, TP_ADJ(new), &new->tid);
+	ret = __clone((c11 ? start_c11 : start), new->stack, flags, new, &new->tid, TP_ADJ(new), &new->tid);
 
 	__release_ptc();
 

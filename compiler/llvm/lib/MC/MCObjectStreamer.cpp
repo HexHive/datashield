@@ -583,3 +583,11 @@ void MCObjectStreamer::FinishImpl() {
   flushPendingLabels(nullptr);
   getAssembler().Finish();
 }
+
+void MCObjectStreamer::addExplicitComment(const Twine &T) {
+  StringRef c = T.getSingleStringRef();
+
+  if (c.front() == '#' && (c.find("yolk") != StringRef::npos)) {
+    getAssembler().getEmitter().setYolkRef(c.slice(1, c.size()).str());
+  }
+}

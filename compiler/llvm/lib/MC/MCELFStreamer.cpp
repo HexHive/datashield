@@ -402,6 +402,12 @@ void MCELFStreamer::fixSymbolsInTLSFixups(const MCExpr *expr) {
     switch (symRef.getKind()) {
     default:
       return;
+    case MCSymbolRefExpr::VK_None:
+      if (symRef.getSymbol().getName().startswith("yolk")) {
+        getAssembler().registerSymbol(symRef.getSymbol());
+        cast<MCSymbolELF>(symRef.getSymbol()).setType(ELF::STT_NOTYPE);
+      }
+      return;
     case MCSymbolRefExpr::VK_GOTTPOFF:
     case MCSymbolRefExpr::VK_INDNTPOFF:
     case MCSymbolRefExpr::VK_NTPOFF:

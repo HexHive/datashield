@@ -1,5 +1,7 @@
 #include <string>
+#include <forward_list>
 #include <set>
+#include <unordered_set>
 #include <algorithm>
 #include <sstream>
 
@@ -93,7 +95,12 @@ SaveModuleBefore("datashield-save-module-before",
 
 static cl::opt<bool>
 LibraryMode("datashield-library-mode",
-    cl::desc("run in library mode ie just mask everything and replace malloc/free"),
+    cl::desc("run in library mode ie just mask everything and replace malloc/free"), // FIXME: I don't think this mode actually masks anything.
+    cl::init(false));
+
+static cl::opt<bool>
+SandboxedProgMode("datashield-sandboxed-prog-mode",
+    cl::desc("run in sandboxed program mode ie just mask everything and replace malloc/free"),
     cl::init(false));
 
 static cl::opt<bool>
@@ -101,6 +108,10 @@ UseSeparationMode("datashield-separation-mode",
     cl::desc("use the separation mode propagation algorith"),
     cl::init(false));
 
+static cl::opt<bool>
+NormalModeNoMain("datashield-normal-mode-no-main",
+    cl::desc("run in normal mode on codes not containing main()"),
+    cl::init(false));
 
 namespace {
 
@@ -111,7 +122,8 @@ StructType *boundsTy;
 PointerType  *int8PtrTy, *int8PtrPtrTy, *int32PtrTy, *int16PtrPtrTy, *int64PtrTy, *int32PtrPtrTy;
 
 Function *unsafeMalloc, *unsafeFree, *unsafeCalloc, *unsafeRealloc, *unsafeStrdup;
-Function *safeMalloc, *safeFree, *safeCalloc, *safeRealloc, *safeStrdup;
+Function *safeFree, *safeCalloc, *safeRealloc, *safeStrdup;
+Value *safeMalloc;
 
 Function *safeMallocDebug, *safeCallocDebug;
 
@@ -124,6 +136,8 @@ Function* safeFreeDebug = nullptr;
 Function* safeAllocDebug = nullptr;
 Function* safeStrError = nullptr;
 Function* safeGetTimeOfDay = nullptr;
+#define SAFE_GMTIME_NAME "__ds_safe_gmtime"
+Function* safeGmtime = nullptr;
 Function* safeMemAlignDebug = nullptr;
 
 size_t IDCounter = 0;
@@ -136,11 +150,52 @@ typedef set<Instruction*> InstructionSet;
 typedef map<Value*, Bounds*> BoundsMap;
 typedef map<Value*, Value*> BasedOnMap;
 
-Function* findFunctionWithSameName(set<Function*> Fs, StringRef name) {
+// Three underscores are needed to accommodate the matching logic in findFunctionWithSameName
+static const char *UNINSTRUMENTED_SUFFIX = "___uninstrumented";
+
+Function* findFunctionWithSameName(set<Function*> Fs, StringRef nameStem, StringRef signatureStr) {
   for (auto& F : Fs) {
-      if (F->getName() == name) {
-        return F;
-      }
+    auto fullNm = F->getName();
+    auto lastUnderscoreIdx = fullNm.find_last_of("_");
+    assert(lastUnderscoreIdx != StringRef::npos && 1 < lastUnderscoreIdx);
+    auto sigIdx = lastUnderscoreIdx - 2;
+
+    auto existingSigStr = fullNm.substr(sigIdx);
+
+    auto existingNameStem = fullNm.substr(0, sigIdx);
+    if (existingNameStem != nameStem)
+      continue;
+
+    if (existingSigStr == signatureStr)
+      // This will permit matching existing "___uninstrumented" functions.
+      return F;
+
+    if (existingSigStr.startswith("___") || signatureStr.startswith("___"))
+      // Avoid comparing ___uninstrumented with an instrumented suffix.
+      continue;
+
+    assert(existingSigStr.size() == signatureStr.size());
+
+    // The sensitivity propagation process can only increase the number
+    // of sensitive operands.  It can never turn an operand non-sensitive.
+    // Furthermore, due to the bidirectional nature of propagation, starting
+    // with a marking of any operand sensitive within each connected component
+    // will result in the entire connected component eventually being marked
+    // as sensitive.  The algorithm below potentially over-estimates sensitivity
+    // for functions that contain multiple sensitive connected components, since
+    // starting with a sensitivity marking in any of them may result in the use of
+    // a function in which all of the connected components are immediately marked
+    // as sensitive.
+    bool matchingSig = true;
+    for (size_t i = 0; matchingSig && i < existingSigStr.size(); i++) {
+      if (signatureStr[i] != '1')
+        continue;
+
+      matchingSig = existingSigStr[i] == '1';
+    }
+
+    if (matchingSig)
+      return F;
   }
   return nullptr;
 }
@@ -149,7 +204,8 @@ void getRuntimeMemManFunctions(Module& M) {
     auto mallocTy = FunctionType::get(int8PtrTy, {int64Ty}, false);
     unsafeMalloc = dyn_cast<Function>(M.getOrInsertFunction("__ds_unsafe_malloc", mallocTy));
     assert(unsafeMalloc && "should be able to get rt functions");
-    safeMalloc = dyn_cast<Function>(M.getOrInsertFunction("__ds_safe_malloc", mallocTy));
+    // This is defined as a void* in <musl>/datashield.c, so getOrInsertFunction returns a cast, not a "Function":
+    safeMalloc = M.getOrInsertFunction("__ds_safe_malloc", mallocTy);
     assert(safeMalloc && "should be able to get rt functions");
 
     auto allocDebugTy = FunctionType::get(int8PtrTy, {int64Ty, int64Ty}, false);
@@ -216,12 +272,35 @@ void getRuntimeMemManFunctions(Module& M) {
       safeStrError = dyn_cast<Function>(M.getOrInsertFunction("__ds_safe_strerror", strErrorTy));
       assert(safeStrError && "should be able to get runtime functions");
 
-      auto timevalTy = M.getTypeByName("struct.timespec");
-      if (timevalTy) {
+      auto initSafeGetTimeOfDay = [&](StructType *timevalTy) {
         auto timevalPtrTy = timevalTy->getPointerTo();
         auto gettimeofdayTy = FunctionType::get(int32Ty, {timevalPtrTy, int8PtrTy}, false);
         safeGetTimeOfDay = dyn_cast<Function>(M.getOrInsertFunction("__ds_safe_gettimeofday", gettimeofdayTy));
+      };
+
+      auto tmTy = M.getTypeByName("struct.tm");
+      if (tmTy) {
+	auto gmtimeTy = FunctionType::get(PointerType::get(tmTy, 0), {int64PtrTy}, false);
+	safeGmtime = dyn_cast<Function>(M.getOrInsertFunction(SAFE_GMTIME_NAME, gmtimeTy));
+      }
+
+      auto timevalTy = M.getTypeByName("struct.timespec");
+      if (timevalTy) {
+        initSafeGetTimeOfDay(timevalTy);
         assert(safeGetTimeOfDay && "should be able to get rt functions");
+      } else {
+        timevalTy = M.getTypeByName("struct.timeval");
+        if (timevalTy) {
+          initSafeGetTimeOfDay(timevalTy);
+          assert(safeGetTimeOfDay && "should be able to get rt functions");
+        }
+	else {
+            timevalTy = M.getTypeByName("struct.u128");
+            if (timevalTy) {
+               initSafeGetTimeOfDay(timevalTy);
+               assert(safeGetTimeOfDay && "should be able to get rt functions");
+            }
+      	}
       }
     }
 
@@ -505,26 +584,25 @@ void replaceOperator(Operator* op, Constant* repl) {
   replMap.replaceAndErase();
 }
 
-Constant* getOrCreateCharPtrPtrGlobal(Module &M, const char* name) {
+Constant* getOrCreateCharPtrPtrGlobal(Module &M, const char* name, bool isDSEnviron) {
   auto int8PtrPtrTy = Type::getInt8PtrTy(M.getContext())->getPointerTo();
   auto gbl = (GlobalVariable*) M.getOrInsertGlobal(name, int8PtrPtrTy);
-  gbl->setInitializer(ConstantPointerNull::get(int8PtrPtrTy));
+  if (isDSEnviron) {
+    gbl->setExternallyInitialized(true);
+  }
+  else
+    gbl->setInitializer(ConstantPointerNull::get(int8PtrPtrTy));
   return gbl;
 }
 
 bool isWhiteListed(Function& F) {
   for (auto&s : whiteList) {
-    if (F.getName().startswith(s)) { return true; }
+    // # is used to indicate that exact matching is desired.
+    if (s[0] == '#') {
+      if (F.getName() == s.substr(1)) { return true; }
+    } else if (F.getName().startswith(s)) { return true; }
   }
   return false;
-}
-
-Function* duplicateFunction(Module& M, Function& oldF, StringRef newName) {
-  ValueToValueMapTy vMap;
-  auto newF = CloneFunction(&oldF, vMap);
-  newF->setName(newName);
-  M.getFunctionList().push_back(newF);
-  return newF;
 }
 
 template<typename T>
@@ -556,6 +634,9 @@ class TypeSet {
       return TypeSet();
   }
   TypeSet(Module& M) {
+    auto vaListTy = M.getTypeByName("struct.__va_list_tag");
+    if (vaListTy)
+      sensTys.insert(PointerType::get(vaListTy, 0));
     findSensitiveTypeAnnotations(M);
     for (auto t : M.getIdentifiedStructTypes()) {
       isSensitiveTypeRecursive(t);
@@ -641,6 +722,7 @@ class TypeSet {
     if (auto I = M.getNamedGlobal("llvm.global.annotations")) {
       Value *Op0 = I->getOperand(0);
       ConstantArray *arr = cast<ConstantArray>(Op0);
+      GlobalVariable *strG = NULL;
       for (unsigned int i = 0; i < arr->getNumOperands(); ++i) {
         ConstantStruct *annoStruct = cast<ConstantStruct>(arr->getOperand(i));
         Constant* cast = annoStruct->getOperand(0);
@@ -653,9 +735,23 @@ class TypeSet {
             (op->getOpcode() == Instruction::GetElementPtr) &&
             (c = dyn_cast<Constant>(op->getOperand(0))))
         {
-          sensTys.insert(val->getType());
-          if (auto ptrTy = dyn_cast<PointerType>(val->getType())) {
+          // check if the string is "sensitive"
+          if (strG && ann->stripPointerCasts() == strG) {
+            sensTys.insert(val->getType());
+            if (auto ptrTy = dyn_cast<PointerType>(val->getType())) {
               sensTys.insert(ptrTy->getElementType());
+            }
+          } else if (GlobalVariable *strS = dyn_cast<GlobalVariable>(ann->stripPointerCasts())) {
+            auto stringInit = strS->getInitializer();
+            if (auto stringArr = dyn_cast<ConstantDataArray>(stringInit)) {
+              if (stringArr->isString() && stringArr->getAsString().startswith("sensitive") && stringArr->getNumElements() == 10) {
+                strG = strS;
+                sensTys.insert(val->getType());
+                if (auto ptrTy = dyn_cast<PointerType>(val->getType())) {
+                  sensTys.insert(ptrTy->getElementType());
+                }
+              }
+            }
           }
 
         } else {
@@ -679,32 +775,47 @@ class ValueSet {
   static ValueSet getEmpty(TypeSet& sensitiveTypes) {
       return ValueSet(sensitiveTypes);
   }
-  const set<Value*> getVals() {
-    return vals;
-  }
-  ValueSet(Module& M, TypeSet& sensitiveTypes): sensitiveTypes(sensitiveTypes) {
-    findSensitiveTypedValues(M);
+  ValueSet(Module& M, TypeSet& sensitiveTypes): sensitiveTypes(sensitiveTypes) {}
+  bool isUnsafeStackPtr(const Value *v) const {
+    if (v->hasName() &&
+        (v->getName() == "unsafe_stack_ptr" ||
+            v->getName() == "unsafe_stack_dynamic_ptr" ||
+            v->getName() == "unsafe_stack_static_top" ||
+            v->getName() == "__safestack_unsafe_stack_ptr")) {
+      return true;
+    }
+    // Avoid checking all accesses to non-default address spaces:
+    // TODO: consider whether some of these should be checked.
+    if (v->getType()->isPointerTy() &&
+        v->getType()->getPointerAddressSpace() != 0) {
+      return true;
+    }
+    const LoadInst *LI = dyn_cast<LoadInst>(v);
+    if (LI != nullptr) {
+      if (LI->getPointerAddressSpace() != 0)
+        return true;
+    }
+    return false;
   }
   bool isChanged = false;
   pair<set<Value*>::iterator, bool> insert(Value* v) {
     if (!(isa<ConstantInt>(v) || isa<ConstantFP>(v) || isa<ConstantPointerNull>(v) || isa<UndefValue>(v))) {
       auto rv = vals.insert(v);
-      if (rv.second) {
-        //v->dump();
-        if (auto ce = dyn_cast<ConstantExpr>(v)) {
-          insert(ce->getOperand(0));
-        } else if (auto vec = dyn_cast<ConstantDataVector>(v)) {
-          if (vec->getElementType()->isPointerTy()) {
-            for (unsigned i = 0, e = vec->getNumElements(); i != e; ++i) {
-              insert(vec->getElementAsConstant(i));
-            }
-          }
-        }
-      }
       isChanged |= rv.second;
       return rv;
     }
     return pair<set<Value*>::iterator, bool>(vals.end(), false);
+  }
+  pair<set<Value*>::iterator, bool> insert(Value* v, Value *sensSrc, const std::string& msg) {
+    auto res = insert(v);
+    if (res.second) {
+      DEBUG(dbgs() << "Propagating sensitivity through " << msg << " from ";
+        if (sensSrc) sensSrc->print(dbgs()); else dbgs() << "(null)";
+        dbgs() << " to ";
+        v->print(dbgs());
+        dbgs() << "\n");
+    }
+    return res;
   }
   size_t count(Value* v) const {
     auto rv = vals.count(v);
@@ -724,42 +835,6 @@ class ValueSet {
   }
   void dump() {
     dumpSet("sensitive values set: ", vals);
-  }
-  void findSensitiveTypedValues(Function& F) {
-    for (inst_iterator It = inst_begin(&F), Ie = inst_end(&F); It != Ie;) {
-      Instruction *I = &*(It++);
-      for (auto& op : I->operands()) {
-        auto val = op.get();
-        //if (sensitiveTypes.count(val->getType())) {
-        if (sensitiveTypes.isSensitiveTypeRecursive(val->getType())) {
-          vals.insert(val);
-        }
-      }
-    }
-  }
-  void findSensitiveTypedValues(Module& M) {
-    // first, let's find every value that is
-    // an explicitly sensitive type
-    // look through globals
-    for (auto& g : M.globals()) {
-      auto type = g.getType();
-      //if (sensitiveTypes.count(type)) {
-      if (sensitiveTypes.isSensitiveTypeRecursive(type)) {
-        vals.insert(&g);
-      }
-    }
-    // look through all function arguments
-    for (auto& F : M) {
-      for (auto& a : F.args()) {
-        if (sensitiveTypes.isSensitiveTypeRecursive(a.getType())) {
-          vals.insert(&a);
-        }
-      }
-    }
-    // look through function bodies
-    for (auto& F : M) {
-      findSensitiveTypedValues(F);
-    }
   }
 };
 
@@ -783,6 +858,26 @@ void replaceAndEraseAndMakeSensitive(ReplacementMap& replMap, ValueSet& sensitiv
   }
 }
 
+bool isNullPointerPassedAsSensitive(CallInst& call, Value* argu, unsigned argNo, const ValueSet& sensitiveSet) {
+  if (!isa<ConstantPointerNull>(argu)) { return false; }
+  auto calledF = call.getCalledFunction();
+  if (!calledF) {
+    // This should be false if the call is to an external function, but we can't know
+    // that for indirect calls.  So, we assume that the call is to an internal function,
+    // which means that all of its parameters are treated as sensitive, since it is
+    // invoked indirectly.
+    return true;
+  }
+  auto arg = calledF->arg_begin();
+  // This is for handling variadic functions, assuming that none of the variadic arguments are sensitive:
+  if (calledF->arg_size() <= argNo)
+    return false;
+  for (unsigned i = 0; i != argNo; ++i) {
+    ++arg;
+  }
+  return sensitiveSet.count(&*arg);
+}
+
 class CallInfo {
   public:
   CallInst& callSite;
@@ -800,6 +895,9 @@ class CallInfo {
     return callSite.getFunctionType()->isVarArg();
   }
   unsigned getNumArgs() const {
+    if (getCallee())
+      // This may differ from callSite.getNumArgOperands() for variadic functions:
+      return getCallee()->arg_size();
     return callSite.getNumArgOperands();
   }
   Type* getParamType(unsigned i) const {
@@ -816,18 +914,28 @@ class CallInfo {
   }
   bool isArgSensitiveAtCallee(unsigned i) const {
     if (auto callee = getCallee()) {
-      for (auto &arg : callee->args()) {
-        if (sensitiveSet.count(&arg)) {
-          return true;
-        }
+      auto arg = callee->arg_begin();
+      // This is to handle variadic arguments, assuming that none of them are sensitive:
+      if (callee->arg_size() <= i)
+        return false;
+      for (unsigned j = 0; j < i; ++j) {
+        arg++;
+      }
+      if (sensitiveSet.count(&*arg)) {
+        return true;
       }
     }
-    if (!replacement) { return false; } // we don't know
-    auto arg = replacement->arg_begin();
-    for (unsigned j = 0; j < i; ++j) {
-      arg++;
+    if (replacement) {
+      auto arg = replacement->arg_begin();
+      // This is to handle variadic arguments, assuming that none of them are sensitive:
+      if (replacement->arg_size() <= i)
+        return false;
+      for (unsigned j = 0; j < i; ++j) {
+        arg++;
+      }
+      return sensitiveSet.count(&*arg);
     }
-    return sensitiveSet.count(&*arg);
+    return false;
   }
   bool isParamTypeSensitive(unsigned i) const {
     return sensitiveTypes.count(getParamType(i));
@@ -911,27 +1019,22 @@ class CallInfo {
     for (unsigned i = 0; i < N; ++i) {
       if (isArgSensitive(i)) { return true; }
     }
-    if (!isVarArg()) {
-      for (unsigned i = 0; i < N; ++i) {
-        if (isParamTypeSensitive(i)) { return true; }
-      }
-      for (unsigned i = 0; i < N; ++i) {
-        if (isArgSensitiveAtCallee(i)) { return true; }
-      }
-    }
     return false;
   }
-  string getSignatureString() {
+  bool isRetSensitive(ValueSet& sensSet) {
+    return isReturnValSensitive() || isReturnTypeSensitive() || sensSet.count(getCallee());
+  }
+  string getSignatureString(ValueSet& sensSet) {
     stringstream ss;
     ss << "_";
-    if(isReturnValSensitive() || isReturnTypeSensitive()) {
+    if(!isDirectCall() || isRetSensitive(sensSet)) {
       ss << "1";
     } else {
       ss << "0";
     }
     ss << "_";
     for (unsigned i = 0, N = getNumArgs(); i != N; i++) {
-      if (isArgSensitive(i) || isParamTypeSensitive(i) || isArgSensitiveAtCallee(i)) {
+      if (!isDirectCall() || isArgSensitive(i) || isParamTypeSensitive(i) || isNullPointerPassedAsSensitive(callSite, callSite.getArgOperand(i), i, sensSet)) {
         ss << "1";
       } else {
         ss << "0";
@@ -978,8 +1081,11 @@ class CallInfoContainer {
       }
     }
   }
+  CallInfo makeCallInfo(CallInst *call, ValueSet& sensitiveSet, TypeSet& sensitiveTypes) {
+    return CallInfo(*call, *call->getParent()->getParent(), sensitiveSet, sensitiveTypes, functionToGlobalMap);
+  }
   void print(raw_ostream& out) {
-    for (auto i : data) {
+    for (auto& i : data) {
       i.print(out);
     }
   }
@@ -990,12 +1096,17 @@ class CallInfoContainer {
 
 class MemoryRegioner {
   Function *unsafeMmap; // there is no safeMmap currently
+  Function *unsafeMunmap; // there is no safeMunmap currently
   ValueSet& sensitiveSet;
   void getRuntimeFunctions(Module& M) {
 
     auto mmapTy = FunctionType::get(int8PtrTy, {int8PtrTy, int64Ty, int32Ty, int32Ty, int32Ty, int64Ty}, false);
     unsafeMmap = dyn_cast<Function>(M.getOrInsertFunction("__ds_unsafe_mmap", mmapTy));
     assert(unsafeMmap && "should be able to get rt functions");
+
+    auto munmapTy = FunctionType::get(int32Ty, {int8PtrTy, int64Ty}, false);
+    unsafeMunmap = dyn_cast<Function>(M.getOrInsertFunction("__ds_unsafe_munmap", munmapTy));
+    assert(unsafeMunmap && "should be able to get rt functions");
   }
   CallInst* getSafeReplacementForAllocationOrFree(CallInst& call, TargetLibraryInfo& TLI) {
     IRBuilder<> IRB(&call);
@@ -1018,7 +1129,7 @@ class MemoryRegioner {
       } else {
         return IRB.CreateCall(safeCalloc, {sizeArg, elemSizeArg}, origName);
       }
-    } else if (isCallToNamedFn(&call, "strdup") || isCallToNamedFn(&call, "__strdup")) {
+    } else if (isCallToNamedFn(&call, "strdup") || isCallToNamedFn(&call, "__strdup") || isCallToNamedFn(&call, "__ds_unsafe_strdup")) {
       return IRB.CreateCall(safeStrdup, {call.getArgOperand(0)}, call.getName());
     } else if (isReallocLikeFnDS(&call, &TLI)) {
       return IRB.CreateCall(safeRealloc, {call.getArgOperand(0), call.getArgOperand(1)}, origName);
@@ -1070,6 +1181,18 @@ class MemoryRegioner {
                 replMap.push_back(pair<Instruction*, Instruction*>(call, replCall));
               }
             }
+            if (call->getCalledFunction()->getName() == "munmap") {
+              if (sensitiveSet.count(call)) {
+                //llvm_unreachable("munmap not implemented in safe region");
+              } else {
+                IRBuilder<> IRB(call);
+                auto replCall = IRB.CreateCall(unsafeMunmap, {
+                                                 call->getArgOperand(0),
+                                                 call->getArgOperand(1)},
+                                               call->getName() + "_unsafe");
+                replMap.push_back(pair<Instruction*, Instruction*>(call, replCall));
+              }
+            }
             if (call->getCalledFunction()->getName() == "strerror") {
               if (sensitiveSet.count(call)) {
                 IRBuilder<> IRB(call);
@@ -1077,9 +1200,18 @@ class MemoryRegioner {
                 replMap.push_back(pair<Instruction*, Instruction*>(call, replCall));
               }
             }
+            if (call->getCalledFunction()->getName() == "gmtime") {
+              if (sensitiveSet.count(call)) {
+		assert(safeGmtime && "Unable to obtain reference to safe gmtime replacement function declaration during initialization, and that function is needed.");
+                IRBuilder<> IRB(call);
+                auto replCall = IRB.CreateCall(safeGmtime, {call->getArgOperand(0)}, call->getName() + "_safe");
+                replMap.push_back(pair<Instruction*, Instruction*>(call, replCall));
+              }
+            }
             if (call->getCalledFunction()->getName() == "gettimeofday") {
               if (sensitiveSet.count(call->getArgOperand(0)) || sensitiveSet.count(call->getArgOperand(1))) {
                 IRBuilder<> IRB(call);
+                assert(safeGetTimeOfDay);
                 auto replCall = IRB.CreateCall(safeGetTimeOfDay, {call->getArgOperand(0), call->getArgOperand(1)}, call->getName() + "_safe");
                 replMap.push_back(pair<Instruction*, Instruction*>(call, replCall));
               }
@@ -1126,12 +1258,119 @@ class MemoryRegioner {
     }
     replaceAndEraseAndMakeSensitive(repls, sensitiveSet);
   }
+  // This assumes that SafeStack has already
+  // run and may have moved some sensitive allocations to the unsafe stack.  The purpose
+  // of this method is to convert such allocations into safe mallocs.
+  void moveSensitiveUnsafeStackAllocsToHeap(Function &F, const DataLayout& DL) {
+    // Allocations that have previously been created for stack frame offsets
+    // indicated by the key in the map:
+    std::map<int64_t, Instruction *> PrevRepls;
+    // for unsafe code we could just do the same thing we do for malloc/free and replace
+    // everything with its unsafe version and then selectively replace that with the safe version
+    TargetLibraryInfoImpl TLII(Triple(F.getParent()->getTargetTriple()));
+    TargetLibraryInfo TLI(TLII);
+    ReplacementMap repls;
+    std::set<Instruction *> toRem;
+    for (auto& BB : F) {
+      for (Instruction& inst : BB) {
+        auto i = &inst;
+
+        if (!sensitiveSet.count(i)) continue;
+
+        bool IsDyn = false;
+        Value *AllocSz = nullptr;
+        if (i->getName().endswith(".safestack-new-dyn-alloc")) {
+          IsDyn = true;
+          Instruction *DefChain = i;
+          BinaryOperator *BinOp = nullptr;
+          while ((BinOp = dyn_cast<BinaryOperator>(DefChain)) == nullptr ||
+              BinOp->getOpcode() != Instruction::Sub) {
+            DefChain = dyn_cast<Instruction>(DefChain->getOperand(0));
+            assert(DefChain != nullptr);
+
+          }
+
+          AllocSz = BinOp->getOperand(1);
+
+          // The address of this dynamic allocation gets stored back to the unsafe stack pointer.
+          // Of course, when it is shifted to the sensitive heap, we need to eliminate this store
+          // instruction.
+          for (auto User : i->users()) {
+            if (auto St = dyn_cast<StoreInst>(User)) {
+              if (St->getPointerAddressSpace() != 0) {
+                toRem.insert(St);
+                break;
+              }
+            }
+          }
+        } else if (i->getName().endswith(".unsafe-byval") || i->getName().endswith(".unsafe")) {
+          auto nm = i->getName();
+          auto szStr = nm.rsplit('.').first.rsplit('.').second;
+          assert(szStr.startswith("sz-") && "Unexpected name.");
+          auto sz = strtoul(szStr.substr(3).str().c_str(), nullptr, 10);
+          AllocSz = ConstantInt::get(int64Ty, sz);
+        } else
+          continue;
+
+        IRBuilder<> IRB(i);
+
+        auto recordRepl = [&](Instruction *repl) {
+          sensitiveSet.insert(repl);
+          repls.push_back(std::make_pair(i, repl));
+        };
+
+        auto genRepl = [&]() {
+          // Insert the replacement allocation at the function entrypoint, because it may be used in several different basic blocks,
+          // and it is necessary to allocate it in some basic block that transitively precedes all of those basic blocks in which
+          // it is used.  The entry block satisfies that requirement.
+          IRBuilder<> EntryIRB(&*F.getEntryBlock().begin());
+          // Dynamic allocations probably need to be placed at the current location, since they may depend on other variables to
+          // determine the size.
+          auto& IRBToUse = IsDyn? IRB : EntryIRB;
+          Instruction *replAlloc = IRBToUse.CreateCall(safeMalloc, {AllocSz}, i->getName() + ".safe-alloc");
+          sensitiveSet.insert(replAlloc);
+          Instruction *repl = dyn_cast<Instruction>(IRBToUse.CreatePointerCast(replAlloc, i->getType()));
+          assert(repl);
+          recordRepl(repl);
+          return repl;
+        };
+
+        if (i->getName().endswith(".unsafe")) {
+          // Trace back to the offset within the stack frame for this allocation:
+          Value *Off = i->getOperand(0);
+          GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Off);
+          assert(GEP != nullptr);
+          ConstantInt *OffCnst = dyn_cast<ConstantInt>(GEP->getOperand(1));
+          assert(OffCnst != nullptr);
+          APInt OffAPInt = OffCnst->getValue();
+          // Alternatively, we could use the name of the value as the key.
+          if (PrevRepls.count(OffAPInt.getSExtValue())) {
+            // FIXME: Is this safe, or are some unsafe stack slots reused by separate allocations?
+            recordRepl(PrevRepls[OffAPInt.getSExtValue()]);
+          } else {
+            PrevRepls.insert(std::make_pair(OffAPInt.getSExtValue(), genRepl()));
+          }
+        } else {
+          genRepl();
+        }
+      }
+    }
+    for (auto i : toRem)
+      i->eraseFromParent();
+    replaceAndEraseAndMakeSensitive(repls, sensitiveSet);
+  }
   void moveSensitiveAllocsToHeap(Function &F, const DataLayout& DL) {
     // replace each sensitive alloca with a malloc (will replace with safe malloc later)
     // at new malloc to sensitive set
     // free all sensitive allocs before returning
 
     //dbgs() << "moving sensitive allocs in: " << F.getName() << "\n";
+
+    // All remaining allocas after SafeStack are always accessed safely,
+    // so there is no need to convert them to safe mallocs.  Avoiding
+    // unnecessary conversions enhances performance.
+    if (F.hasFnAttribute(Attribute::SafeStack))
+      return;
 
     vector<AllocaInst*> sensitiveAllocas;
     vector<CallInst*> replacementMallocs;
@@ -1213,7 +1452,14 @@ class MemoryRegioner {
       }
     }
   }
-  void replaceByValSensitiveArguments(Module&M, Function& F, DataLayout& DL) {
+  void replaceByValSensitiveArguments(Module&M, Function& F, const DataLayout& DL) {
+    // The transformation applied by this routine is unnecessary
+    // if SafeStack has left an argument on the safe stack.  If it can be
+    // accessed unsafely, then SafeStack would have moved it to the unsafe
+    // stack.
+    if (F.hasFnAttribute(Attribute::SafeStack))
+      return;
+
     for (auto& a : F.getArgumentList()) {
       if (a.hasByValAttr() && sensitiveSet.count(&a)) {
         IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
@@ -1273,6 +1519,11 @@ class Sandboxer {
   Function* copyEnvironToSafe = nullptr;
   Function* unsafeGetTemporaryBuffer = nullptr;
   Function* safeCopyArgv = nullptr;
+  const DataLayout *DL;
+  ObjectSizeOffsetEvaluator *ObjSizeEval;
+  InlineAsm *BoundCheckIAsm = nullptr;
+  /// Instructions that store to safe stack allocations.
+  std::set<const Instruction *> *AllocaAccesses;
   const size_t mask = (1ull << 32) -1;
   void getRuntimeFunctions(Module& M) {
     auto switchStacksTy = FunctionType::get(int32Ty, {int32Ty, int8PtrPtrTy}, false);
@@ -1311,13 +1562,20 @@ class Sandboxer {
     unsafeGetTemporaryBuffer = dyn_cast<Function>(M.getOrInsertFunction("__ds_unsafe_get_temporary_buffer", unsafeGetTemporaryBufferTy));
     assert(unsafeGetTemporaryBuffer && "should be able to get rt functions");
   }
-  void replaceEnviron(Module& M, CallInst* copyCall, LoadInst* origEnvironVal) {
-    auto dsEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_environ");
-    auto environ = M.getGlobalVariable("environ");
+  void replaceEnviron(Module& M, bool isSensitive, CallInst* copyCall = NULL, LoadInst* origEnvironVal = NULL) {
+    auto environ = M.getGlobalVariable("__environ");
+    if (!environ)
+      environ = M.getGlobalVariable("environ");
     if (!environ) {
       // this module doesn't use environ
       return;
     } else {
+      Constant* dsEnviron;
+      if (isSensitive)
+        dsEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_safe_environ", true);
+      else
+        dsEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_unsafe_environ", true);
+
       vector<User*> worklist(environ->user_begin(), environ->user_end());
       for (auto& U : worklist) {
         if (U != copyCall && U != origEnvironVal) {
@@ -1336,11 +1594,11 @@ class Sandboxer {
     auto block = BasicBlock::Create(M.getContext(), "entry", &newMain);
     IRBuilder<> IRB(block);
     // copy environ to unsafe heap
-    Value* environ = M.getGlobalVariable("environ");
+    Value* environ = M.getGlobalVariable("__environ");
     if (environ) {
       auto environLoaded = IRB.CreateLoad(environ);
       auto copyCall = IRB.CreateCall(copyEnvironToUnsafe, {environLoaded});
-      replaceEnviron(M, copyCall, environLoaded);
+      replaceEnviron(M, false, copyCall, environLoaded);
     } else if (newMain.getArgumentList().size() == 3) {
       environ = &newMain.getArgumentList().back();
       IRB.CreateCall(copyEnvironToUnsafe, {environ});
@@ -1406,7 +1664,7 @@ class Sandboxer {
     auto argv = IRB.CreateExtractValue(argsStructV, (uint64_t)1ull, "argv");
     Value* copyMainRV = nullptr;
     if (mainCopy.getArgumentList().size() == 3) {
-      auto copiedEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_environ");
+      auto copiedEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_environ", true);
       auto copiedEnvironV = IRB.CreateLoad(copiedEnviron);
       copyMainRV = IRB.CreateCall(&mainCopy, {argc, argv, copiedEnvironV});
     } else if (mainCopy.getArgumentList().size() == 2) {
@@ -1511,9 +1769,11 @@ class Sandboxer {
   public:
   void copyAndReplaceArgvIfNecessary(Module& M, ValueSet& sensitiveSet) {
     auto main = M.getFunction("main");
-    if (main == nullptr) { llvm_unreachable("should be able to find main function"); }
+    if (main == nullptr) {
+      return;
+      }
     auto args = main->arg_begin();
-    if (args == main->arg_end()) { llvm_unreachable("main has no arguments.  unsupported."); }
+    if (args == main->arg_end()) { return; }
     auto argc = &*args;
     args++;
     if (args == main->arg_end()) { llvm_unreachable("main has only 1 argument.  unsupported."); }
@@ -1528,75 +1788,304 @@ class Sandboxer {
         }
       }
     }
+    else {
+      IRBuilder<> IRB(&*main->getEntryBlock().getFirstInsertionPt());
+      auto argv_repl = IRB.CreateCall(dsUnsafeCopyArgv, {argc, argv}, "argv_repl");
+      vector<User*> argv_users(argv->user_begin(), argv->user_end());
+      for (auto &u : argv_users) {
+        if (u != argv_repl) {
+          u->replaceUsesOfWith(argv, argv_repl);
+        }
+      }
+    }
   }
   void copyAndReplaceEnviron(Module& M, ValueSet& sensitiveSet) {
+    Value* environ = M.getGlobalVariable("__environ");
+    if (!environ)
+      environ = M.getGlobalVariable("environ");
+    if (!environ) {return;}
+
     Function* main = M.getFunction("main");
     if (!main) {
-      llvm_unreachable("we should be able to find main with LTO");
+      dbgs() << "no main, replace __environ or environ with __ds_safe_environ or __ds_unsafe_environ\n";
+      replaceEnviron(M, sensitiveSet.count(environ));
+      return;
     }
-    auto dsEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_environ");
-    Value* environ = M.getGlobalVariable("environ");
-    if (!environ) { return; }
+    dbgs() << "has main, replace __environ or environ with __ds_safe_environ or ds_unsafe_environ\n";
+    auto dsSafeEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_safe_environ", true);
+    auto dsUnsafeEnviron = getOrCreateCharPtrPtrGlobal(M, "__ds_unsafe_environ", true);
     IRBuilder<> IRB(&*main->getEntryBlock().getFirstInsertionPt());
     auto environLoaded = IRB.CreateLoad(environ);
-    CallInst* copyCall;
-    if (environ && !sensitiveSet.count(environ)) {
-      copyCall = IRB.CreateCall(copyEnvironToUnsafe, {environLoaded});
+
+    if (!sensitiveSet.count(environ)) {
+      auto copyCallUnsafe = IRB.CreateCall(copyEnvironToUnsafe, {environLoaded});
+      IRB.CreateStore(copyCallUnsafe, dsUnsafeEnviron);
+      replaceEnviron(M, false, copyCallUnsafe, environLoaded);
+      auto copyCallSafe = IRB.CreateCall(copyEnvironToSafe, {environLoaded});
+      sensitiveSet.insert(dsSafeEnviron);
+      sensitiveSet.insert(copyCallSafe);
+      IRB.CreateStore(copyCallSafe, dsSafeEnviron);
     } else {
-      copyCall = IRB.CreateCall(copyEnvironToSafe, {environLoaded});
-      sensitiveSet.insert(dsEnviron);
-      sensitiveSet.insert(copyCall);
+      auto copyCallSafe = IRB.CreateCall(copyEnvironToSafe, {environLoaded});
+      sensitiveSet.insert(dsSafeEnviron);
+      sensitiveSet.insert(copyCallSafe);
+      IRB.CreateStore(copyCallSafe, dsSafeEnviron);
+      replaceEnviron(M, true, copyCallSafe, environLoaded);
+      auto copyCallUnsafe = IRB.CreateCall(copyEnvironToUnsafe, {environLoaded});
+      IRB.CreateStore(copyCallUnsafe, dsUnsafeEnviron);
     }
-    IRB.CreateStore(copyCall, dsEnviron);
-    replaceEnviron(M, copyCall, environLoaded);
+  }
+
+#define DEBUG_LABEL "DataShield/SafeStackMPX: "
+
+  void findPerAllocaAccesses(const Value *AllocaPtr) {
+    SmallPtrSet<const Value *, 16> Visited;
+    SmallVector<const Value *, 8> WorkList;
+    WorkList.push_back(AllocaPtr);
+
+    // A DFS search through all uses of the alloca in bitcasts/PHI/GEPs/etc.
+    while (!WorkList.empty()) {
+      const Value *V = WorkList.pop_back_val();
+      for (const Use &UI : V->uses()) {
+        auto I = cast<const Instruction>(UI.getUser());
+
+        assert(V == UI.get());
+
+        if (isa<const LoadInst>(*I)) {
+          AllocaAccesses->insert(I);
+        } else if (isa<const StoreInst>(*I) ||
+            isa<const AtomicCmpXchgInst>(*I) ||
+            isa<const AtomicRMWInst>(*I)) {
+          Value *StoredVal;
+          if (isa<const StoreInst>(*I)) {
+            StoredVal = I->getOperand(0);
+          } else if (isa<const AtomicCmpXchgInst>(*I)) {
+            StoredVal = I->getOperand(2);
+          } else {
+            assert(isa<const AtomicRMWInst>(*I));
+            StoredVal = I->getOperand(1);
+          }
+
+          assert(V != StoredVal &&
+                 "Unexpected store of safe stack allocation address.");
+
+          AllocaAccesses->insert(I);
+        } else if (auto MI = dyn_cast<const MemIntrinsic>(I)) {
+          AllocaAccesses->insert(MI);
+        } else if (isa<const PHINode>(*I) ||
+                   isa<const GetElementPtrInst>(*I) ||
+                   isa<const SelectInst>(*I) ||
+                   isa<const CastInst>(*I)) {
+
+          if (const GetElementPtrInst *GEP = dyn_cast<const GetElementPtrInst>(I))
+            assert(GEP->getPointerOperand() == V &&
+                   "Safe stack allocation used as one of the GEP indices rather "
+                   "than the pointer operand.");
+
+          // This assumes that the instruction types in the condition are the only
+          // ones used to compute or propagate the address of the allocation.
+          if (Visited.insert(I).second)
+            WorkList.push_back(I);
+        }
+      }
+    }
+  }
+
+  void findAllAllocaAccesses(Function &F) {
+    for (Instruction &I : instructions(&F))
+      if (auto AI = dyn_cast<AllocaInst>(&I))
+        findPerAllocaAccesses(AI);
+
+    for (Argument &Arg : F.args())
+      if (Arg.hasByValAttr())
+        findPerAllocaAccesses(&Arg);
+  }
+
+  void insertBoundCheck(Value *Ptr, Value *Length, Instruction *InsertPt) {
+    DEBUG(dbgs() << DEBUG_LABEL << "Insert bound check for ";
+          Length->print(dbgs()); dbgs() << "-byte access to "; Ptr->print(dbgs());
+          dbgs() << " ahead of "; InsertPt->print(dbgs()); dbgs() << "\n");
+
+    // Check for accesses to thread-local (global) variables:
+    // FIXME: Also handle select and phi instructions.
+    GlobalVariable *GV = dyn_cast<GlobalVariable>(Ptr);
+    if (GV == nullptr) {
+      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+        while ((GEP = dyn_cast<GetElementPtrInst>(GEP->getPointerOperand())));
+        if (GEP != nullptr)
+          GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
+      }
+    }
+    if (GV != nullptr &&
+        GV->getThreadLocalMode() != GlobalValue::NotThreadLocal) {
+      // Linear addresses for thread-local accesses are computed with a non-zero
+      // segment base address, so it would be necessary to check thread-local
+      // effective addresses against a bounds register with an upper bound that
+      // is adjusted down to account for that rather than the bounds register that
+      // is used for checking other accesses.
+      // However, negative offsets are sometimes used for thread-local accesses,
+      // which are treated as very large unsigned effective addresses.  Checking
+      // them would require them to first be added to the base of the thread-local
+      // storage segment.  Instead, the current implementation does not check
+      // accesses to thread-local storage.
+      DEBUG(dbgs() << DEBUG_LABEL
+                   << "Skip bound check for access to thread-local storage\n");
+      return;
+    }
+
+    IRBuilder<> IRB(InsertPt);
+    auto GenericPtr =
+        IRB.CreatePointerBitCastOrAddrSpaceCast(Ptr, IRB.getInt8PtrTy());
+    auto BoundGEP = IRB.CreateGEP(nullptr, GenericPtr, makeArrayRef(Length));
+    IRB.CreateCall(BoundCheckIAsm, makeArrayRef(BoundGEP));
+
+    //++NumChecks;
+  }
+
+  bool instrumentInstrWithMPX(Instruction *Inst, ValueSet& sensitiveSet) {
+    if (AllocaAccesses->count(Inst))
+      // Do not instrument accesses to the safe stack
+      return false;
+
+    Value *Ptr = nullptr;
+    Value *NeededSizeVal = nullptr;
+
+    auto computeNeededSize = [&](Value *V) {
+      uint64_t S = DL->getTypeStoreSize(V->getType());
+      NeededSizeVal =
+          ConstantInt::get(DL->getIntPtrType(Inst->getContext()), S, false);
+    };
+
+    if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
+      if (sensitiveSet.isUnsafeStackPtr(LI))
+        return false;
+
+      Ptr = LI->getPointerOperand();
+      computeNeededSize(LI);
+    } else if (StoreInst *SI = dyn_cast<StoreInst>(Inst)) {
+      Ptr = SI->getPointerOperand();
+
+      if (sensitiveSet.isUnsafeStackPtr(Ptr))
+        return false;
+
+      computeNeededSize(SI->getValueOperand());
+    } else if (MemIntrinsic *MI = dyn_cast<MemIntrinsic>(Inst)) {
+      Ptr = MI->getDest();
+      NeededSizeVal = MI->getLength();
+    } else if (AtomicCmpXchgInst *AI = dyn_cast<AtomicCmpXchgInst>(Inst)) {
+      Ptr = AI->getPointerOperand();
+      computeNeededSize(AI->getCompareOperand());
+    } else if (AtomicRMWInst *AI = dyn_cast<AtomicRMWInst>(Inst)) {
+      Ptr = AI->getPointerOperand();
+      computeNeededSize(AI->getValOperand());
+    } else {
+      llvm_unreachable("unknown Instruction type");
+    }
+
+    if (sensitiveSet.count(Ptr))
+      // Do not instrument accesses to sensitive values
+      return false;
+
+    ConstantInt *NeededSizeConst = dyn_cast<ConstantInt>(NeededSizeVal);
+
+    if (NeededSizeConst == nullptr) {
+      insertBoundCheck(Ptr, NeededSizeVal, Inst);
+      return true;
+    }
+
+    const APInt &NeededSize = NeededSizeConst->getValue();
+
+    DEBUG(dbgs() << DEBUG_LABEL << "Instrument "; NeededSize.print(dbgs(), false);
+          dbgs() << "-byte access to "; Ptr->print(dbgs());
+          dbgs() << " by "; Inst->print(dbgs()); dbgs() << "\n");
+
+    SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
+
+    if (ObjSizeEval->bothKnown(SizeOffset)) {
+      DEBUG(dbgs() << DEBUG_LABEL << "Size and offset are known.\n");
+
+      Value *Size   = SizeOffset.first;
+      Value *Offset = SizeOffset.second;
+      ConstantInt *SizeCI = dyn_cast<ConstantInt>(Size);
+      ConstantInt *OffsetCI = dyn_cast<ConstantInt>(Offset);
+
+      // three checks are required to ensure safety:
+      // . Offset >= 0  (since the offset is given from the base ptr)
+      // . Size >= Offset  (unsigned)
+      // . Size - Offset >= NeededSize  (unsigned)
+      if (SizeCI && OffsetCI) {
+        const APInt &SizeVal = SizeCI->getValue();
+        const APInt &OffsetVal = OffsetCI->getValue();
+
+        DEBUG(dbgs() << DEBUG_LABEL << "Size and offset are constant: ";
+              SizeVal.print(dbgs(), false); dbgs() << ", ";
+              OffsetVal.print(dbgs(), true); dbgs() << "\n");
+
+        bool Overflow = false;
+        if (OffsetVal.isNonNegative() &&
+            SizeVal.usub_ov(OffsetVal, Overflow).uge(NeededSize) &&
+            Overflow == false) {
+
+          DEBUG(dbgs() << DEBUG_LABEL << "Elided unnecessary bound check.\n");
+
+          //++NumElidedChecks;
+
+          return false;
+        }
+      }
+    }
+
+    insertBoundCheck(Ptr, NeededSizeVal, Inst);
+    return true;
   }
 
   Function* origMain;
-  void insertPointerMasks(Function& F, ValueSet& sensitiveSet) {
-    //DEBUG(dbgs() << "[Sandboxer] in function: " << F.getName() << "\n");
-    ReplacementMap replacementMap;
-    if (UsePrefix && !F.isDeclaration()) {
-        F.setMetadata(maskMDString, maskMD);
-        return;
-    }
-    for (inst_iterator It = inst_begin(&F), Ie = inst_end(&F); It != Ie;) {
-      Instruction *I = &*(It++);
-      if (auto load = dyn_cast<LoadInst>(I)) {
-        if (IntegrityOnlyMode) { continue; }
-        if (sensitiveSet.count(load->getPointerOperand())) { continue; }
-        if (!shouldMask(load, sensitiveSet)) { continue; }
-        if (UseMPX) {
-            insertUnsafeBoundsCheckMPX(load);
-        } else if (UseMask) {
-          auto maskedPtr = maskPtr(load);
-          DEBUG(dbgs() << "[Sandboxer] masked load: "; load->dump());
-          IRBuilder<> IRB(load);
-          auto newload = IRB.CreateAlignedLoad(maskedPtr,
-              load->getAlignment(),
-              load->getName());
-          replacementMap.push_back(pair<Instruction*, Instruction*>(load, newload));
+  void insertPointerMasks(Function& F, ValueSet& sensitiveSet, std::set<const Instruction *> &AllocaAccesses_,
+                          const DataLayout *DL_, const TargetLibraryInfo& TLI) {
+
+    DL = DL_;
+    AllocaAccesses = &AllocaAccesses_;
+
+    BoundCheckIAsm =
+      InlineAsm::get(FunctionType::get(Type::getVoidTy(F.getContext()),
+                                       makeArrayRef<Type *>(Type::getInt8PtrTy(F.getContext(), 0)),
+                                       false),
+                     "bndcu $0, %bnd0", "*m", false);
+
+    ObjectSizeOffsetEvaluator TheObjSizeEval(*DL, &TLI, F.getContext(),
+                                          /*RoundToAlign=*/true);
+    ObjSizeEval = &TheObjSizeEval;
+
+    findAllAllocaAccesses(F);
+   
+    for (auto &BB : F) {
+      // check HANDLE_MEMORY_INST in include/llvm/Instruction.def for memory
+      // touching instructions
+      std::forward_list<llvm::Instruction *> WorkList;
+      for (Instruction &I : BB) {
+        if (LoadInst *load = dyn_cast<LoadInst>(&I)) {
+          if (!load->getType()->isPointerTy())
+           continue;
+          Value* nonCastedPtrOp = load->getPointerOperand();
+          while (BitCastInst *cast = dyn_cast<BitCastInst>(nonCastedPtrOp)) {
+            nonCastedPtrOp = cast->getOperand(0);
+          }
+          if (nonCastedPtrOp->hasName() && nonCastedPtrOp->getName().startswith("vaarg.addr")) {
+            DEBUG(dbgs() << "from vararg.addr, no MPX bounds check\n");
+            continue;
+          }
+          WorkList.push_front(&I);
+          continue;
         }
+        if (isa<StoreInst>(I) || isa<AtomicCmpXchgInst>(I) ||
+            isa<AtomicRMWInst>(I) || isa<MemIntrinsic>(I))
+          WorkList.push_front(&I);
       }
-      if (auto store = dyn_cast<StoreInst>(I)) {
-        if (ConfidentialityOnlyMode) { continue; }
-        if (sensitiveSet.count(store->getPointerOperand())) { continue; }
-        if (!shouldMask(store, sensitiveSet)) { continue; }
-        if (UseMPX) {
-            insertUnsafeBoundsCheckMPX(store);
-        } else if (UseMask) {
-          auto maskedPtr = maskPtr(store);
-          DEBUG(dbgs() << "[Sandboxer] masked store: "; store->dump());
-          auto valOp = store->getValueOperand();
-          IRBuilder<> IRB(store);
-          auto newstore = IRB.CreateAlignedStore(valOp,
-              maskedPtr,
-              store->getAlignment(),
-              store->isVolatile());
-          replacementMap.push_back(pair<Instruction*, Instruction*>(store, newstore));
-        }
-      }
+      for (Instruction *Inst : WorkList)
+        instrumentInstrWithMPX(Inst, sensitiveSet);
     }
-    replacementMap.replaceAndErase();
+
+    AllocaAccesses = nullptr;
   }
   Sandboxer(Module& M) {
     maskMD = MDNode::get(M.getContext(), MDString::get(M.getContext(), maskMDString));
@@ -1619,65 +2108,126 @@ class SensitivityAnalysis {
     }
     return false;
   }
-  void propagateSensitivity(Function& F) {
-    bool changed;
-    do {
-      changed = false;
-      for (inst_iterator It = inst_begin(&F), Ie = inst_end(&F); It != Ie;) {
-        Instruction *I = &*(It++);
-        if (isa<BranchInst>(I)) { continue; } // ignore these
-        if (auto call = dyn_cast<CallInst>(I)) {
-          // allow the operands of memcpy to progagate sensitivity
-          if (call->getCalledFunction() && call->getCalledFunction()->getName().startswith("llvm.memcpy")) {
-            if (sensitiveSet.count(call->getArgOperand(0)) || sensitiveSet.count(call->getArgOperand(1))) {
-              changed |= sensitiveSet.insert(call->getArgOperand(0)).second;
-              changed |= sensitiveSet.insert(call->getArgOperand(1)).second;
-              continue;
-            }
-          } else if (call->getCalledFunction() && call->getCalledFunction()->getName().startswith("strchr")) {
-            if (sensitiveSet.count(call->getArgOperand((0))) || sensitiveSet.count(call)) {
-              changed |= sensitiveSet.insert(call->getArgOperand(0)).second;
-              changed |= sensitiveSet.insert(call).second;
-              continue;
-            }
-          } else {
-            continue;
-          }
-        } // we allow CallInst with mixed sensitivity so dont propagate them
-        if (UseSeparationMode) {
-          if (I->getOpcode() == Instruction::Add) { continue; }
-          if (I->getOpcode() == Instruction::FAdd) { continue; }
-          if (I->getOpcode() == Instruction::Sub) { continue; }
-          if (I->getOpcode() == Instruction::FSub) { continue; }
-          if (I->getOpcode() == Instruction::Mul) { continue; }
-          if (I->getOpcode() == Instruction::FMul) { continue; }
-          if (I->getOpcode() == Instruction::UDiv) { continue; }
-          if (I->getOpcode() == Instruction::SDiv) { continue; }
-          if (I->getOpcode() == Instruction::FDiv) { continue; }
-          if (I->getOpcode() == Instruction::URem) { continue; }
-          if (I->getOpcode() == Instruction::SRem) { continue; }
-          if (I->getOpcode() == Instruction::FRem) { continue; }
-          if (I->getOpcode() == Instruction::And) { continue; }
-          if (I->getOpcode() == Instruction::Or) { continue; }
-          if (I->getOpcode() == Instruction::Xor) { continue; }
+  void makeValSensitive(Value *V_) {
+    Value &V = *V_;
+    if (isa<BranchInst>(&V)) return; // ignore these
+    if (sensitiveSet.isUnsafeStackPtr(&V)) return;
+
+    if (!sensitiveSet.insert(&V).second)
+      return;
+
+    //make all return instructions sensitive when F is made sensitive
+    if (auto Fn = dyn_cast<Function>(&V)) {
+      for (auto& BB : *Fn) {
+        for (auto& Inst : BB) {
+          if (isa<ReturnInst>(&Inst))
+            makeValSensitive(&Inst);
         }
-        if (anySensitiveOperands(I)) {
-          changed |= sensitiveSet.insert(I).second;
-          for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
-            auto v = I->getOperand(i);
-            changed |= sensitiveSet.insert(v).second;
+      }
+    }
+
+    // function pointer should not make function sensitive
+    if (auto expr = dyn_cast<ConstantExpr>(&V)) {
+      if (expr->isCast()) {
+        DEBUG(dbgs() << "cast expr: " << *expr << "\n");
+        if (isa<Function>(expr->stripPointerCasts())) {
+          DEBUG(dbgs() << "function pointer, return\n");
+          return;
+        }
+      }
+    } else if (auto cast = dyn_cast<CastInst>(&V)) {
+      DEBUG(dbgs() << "cast inst: " << *cast << "\n");
+      if (isa<Function>(cast->stripPointerCasts())) {
+        DEBUG(dbgs() << "function pointer, return\n");
+        return;
+      }
+    }
+
+    auto propagateThroughLibcRoutinesThatReturnPtrToParam = [&](CallInst *call) {
+      if (call->getCalledFunction() &&
+	  // Keep in sync with list in BoundsAnalysis::getOrLoadBoundsFromBasedOn.
+	  (call->getCalledFunction()->getName().startswith("strchr") ||
+	   call->getCalledFunction()->getName().startswith("strrchr")) &&
+	  (sensitiveSet.count(call->getArgOperand(0)) || sensitiveSet.count(call))) {
+        makeValSensitive(call->getArgOperand(0));
+	makeValSensitive(call);
+      }
+    };
+
+    
+    for (auto U : V.users()) {
+      if (CallInst *call = dyn_cast<CallInst>(U)) {
+        if (isa<Function>(&V) && call->getCalledFunction() == &V) {
+          // Only sensitivity from functions is propagated in this way.
+          // Just because an operand is sensitive does not imply that
+          // the return values from the function as also sensitive.
+          if (!isWhiteListed(*call->getParent()->getParent()))
+            makeValSensitive(U);
+
+          continue;
+        }
+
+        // allow the operands of memcpy to progagate sensitivity
+        if (call->getCalledFunction() && call->getCalledFunction()->getName().startswith("llvm.memcpy")) {
+          if (sensitiveSet.count(call->getArgOperand(0)) || sensitiveSet.count(call->getArgOperand(1))) {
+            makeValSensitive(call->getArgOperand(0));
+            makeValSensitive(call->getArgOperand(1));
+          }
+        }
+	
+	propagateThroughLibcRoutinesThatReturnPtrToParam(call);
+      } else {
+        if (isa<Function>(&V))
+          // Do not propagate sensitivity from a function return value to
+          // pointers to that function.
+          continue;
+
+        makeValSensitive(U);
+      }
+    }
+    if (CallInst *call = dyn_cast<CallInst>(&V)) {
+      propagateThroughLibcRoutinesThatReturnPtrToParam(call);
+      // Other calls are handled in analyzeModule.
+      // Just because the return value from a function is sensitive, that
+      // does not imply that all of its parameters should also be sensitive.
+      return;
+    }
+    if (User *SensU = dyn_cast<User>(&V)) {
+      for (auto& O : SensU->operands()) {
+        // The runtime routines for retrieving bounds return infinite bounds if queried for the bounds of
+        // a non-sensitive value.  So, it is unnecessary to back propagate after moving forward from a
+        // sensitive-typed object.  If those routines didn't behave in that way, then it would be necessary
+        // to mark all objects as sensitive that may ever be pointed to by pointers that may ever point
+        // to a sensitive object.
+
+        // do not make function sensitive if it is used in non-call instruction
+        if (isa<Function>(O.get())) {
+          DEBUG(dbgs() << "not call instruction, function pointer, continue\n");
+          continue;
+        } else {
+          makeValSensitive(O.get());
+        }
+      }
+
+      // A single unsafe stack slot offset can get computed many times in a single function.  If it
+      // is ever marked sensitive, it should always be marked sensitive.
+      if (SensU->getName().endswith(".unsafe")) {
+        Instruction *I = dyn_cast<Instruction>(SensU);
+        assert(I != nullptr);
+        for (auto& BB : *I->getParent()->getParent()) {
+          for (auto& I2 : BB) {
+            if (I2.hasName() && I2.getName() == SensU->getName())
+              makeValSensitive(&I2);
           }
         }
       }
-    } while (changed);
-  }
-  void propagateSensitivity(Module& M) {
-    for (auto& F : M) {
-      if (!isWhiteListed(F)) {
-        //dbgs() << "scanning: " << F.getName() << "\n";
-        propagateSensitivity(F);
-        //sensitiveSet.dump();
-      }
+    }
+
+    if (ReturnInst *ret = dyn_cast<ReturnInst>(&V)) {
+      // Mark the parent function as sensitive, since at least one of its return instructions is sensitive.
+      Function *F = ret->getParent()->getParent();
+
+      makeValSensitive(F);
     }
   }
   void makeReturnsSensitive(Function* F) {
@@ -1685,26 +2235,8 @@ class SensitivityAnalysis {
       Instruction *I = &*(It++);
       if (auto ret = dyn_cast<ReturnInst>(I)) {
         if(auto rv = ret->getReturnValue()) {
-          sensitiveSet.insert(rv);
+          sensitiveSet.insert(rv, nullptr, __FUNCTION__);
         }
-      }
-    }
-  }
-  void propagateAcrossCallBoundary(Function* F, CallInfo& info) {
-    // propagate sensitivity across caller/callee boundary in both directions
-    if (info.isReturnValSensitive() || info.isReturnTypeSensitive()) {
-      makeReturnsSensitive(F);
-      sensitiveSet.insert(F);
-      if (info.isDirectCall()) {
-        sensitiveSet.insert(info.getCallee());
-      }
-    }
-    auto it = F->arg_begin();
-    for (unsigned i = 0, N = info.getNumArgs(); i != N; ++i, it++) {
-      if (info.isArgSensitive(i) || info.isParamTypeSensitive(i) || info.isArgSensitiveAtCallee(i)) {
-        sensitiveSet.insert(&*it);
-        auto arg = info.callSite.getArgOperand(i);
-        sensitiveSet.insert(arg);
       }
     }
   }
@@ -1765,6 +2297,52 @@ class SensitivityAnalysis {
     return nullptr;
   }
 
+  Function* duplicateFunction(Module& M, Function& oldF, StringRef newName) {
+    ValueToValueMapTy vMap;
+    auto newF = CloneFunction(&oldF, vMap);
+    newF->setName(newName);
+    // This is already done by CloneFunction:
+    //M.getFunctionList().push_back(newF);
+    return newF;
+  }
+
+  void copyInstructionSensitivity(Function& oldF, Function& newF) {
+    {
+      if (sensitiveSet.count(&oldF))
+        sensitiveSet.insert(&newF);
+
+      auto oldInst = inst_begin(oldF);
+      auto newInst = inst_begin(newF);
+      auto oldInstEnd = inst_end(oldF);
+      auto newInstEnd = inst_end(newF);
+      while (oldInst != oldInstEnd) {
+        assert(newInst != newInstEnd);
+
+        if (sensitiveSet.count(&*oldInst))
+          sensitiveSet.insert(&*newInst);
+
+        oldInst++;
+        newInst++;
+      }
+      assert(newInst == newInstEnd);
+    }
+
+    auto oldArg = oldF.arg_begin();
+    auto newArg = newF.arg_begin();
+    auto oldArgEnd = oldF.arg_end();
+    auto newArgEnd = newF.arg_end();
+    while (oldArg != oldArgEnd) {
+      assert(newArg != newArgEnd);
+
+      if (sensitiveSet.count(&*oldArg))
+        sensitiveSet.insert(&*newArg);
+
+      oldArg++;
+      newArg++;
+    }
+    assert(newArg == newArgEnd);
+  }
+
   Function* cloneFunctionWithSensitivity(Module& M, StringRef origName, vector<int>& sensitivity) {
     auto origFn = M.getFunction(origName);
     if (origFn) {
@@ -1784,11 +2362,13 @@ class SensitivityAnalysis {
       }
       auto newName = origName.str() + suffix.str();
       auto newFn = duplicateFunction(M, *origFn, newName);
+      copyInstructionSensitivity(*origFn, *newFn);
       if (sensitivity[0] == 1) {
         makeReturnsSensitive(newFn);
       }
       for (unsigned i = 1; i < sensitivity.size(); ++i) {
-        makeNthArgSensitive(*newFn, i-1);
+        if (sensitivity[i] == 1)
+          makeNthArgSensitive(*newFn, i-1);
       }
       newFunctions.insert(newFn);
       return newFn;
@@ -1827,7 +2407,6 @@ class SensitivityAnalysis {
         sensitiveSet.insert(i);
       }
     }
-    propagateSensitivity(*fn);
   }
 
   public:
@@ -1837,6 +2416,7 @@ class SensitivityAnalysis {
   CallInfoContainer callInfos;
   TypeSet sensitiveTypes;
   ValueSet sensitiveSet;
+  set<const Instruction *> allocaAccesses;
   SensitivityAnalysis(Module& M) : M(M), callInfos(M, functionToGlobalMap), sensitiveTypes(M), sensitiveSet(M, sensitiveTypes) {}
   void analyzeModule() {
     sensitiveTypes.dump();
@@ -1996,63 +2576,485 @@ class SensitivityAnalysis {
       cloneFunctionWithSensitivity(M, "_ZN9regwayobj12isaddtoboundEP6regobjS1_", _ZN9regwayobj12isaddtoboundEP6regobjS1_sens);
     }
 
+    auto findSensitiveTypedValues = [&](Function &F) {
+      for (inst_iterator It = inst_begin(&F), Ie = inst_end(&F); It != Ie;) {
+        Instruction *I = &*(It++);
+        for (auto& op : I->operands()) {
+          auto val = op.get();
+          if (sensitiveTypes.isSensitiveTypeRecursive(val->getType())) {
+            makeValSensitive(val);
+          }
+        }
+      }
+    };
+
+    // first, let's find every value that is
+    // an explicitly sensitive type
+    // look through globals
+    for (auto& g : M.globals()) {
+      auto type = g.getType();
+      if (sensitiveTypes.isSensitiveTypeRecursive(type)) {
+        makeValSensitive(&g);
+      }
+    }
+    // look through all function arguments
+    for (auto& F : M)
+      for (auto& a : F.args())
+        if (sensitiveTypes.isSensitiveTypeRecursive(a.getType()))
+          makeValSensitive(&a);
+
     for (auto& F : M) {
-      sensitiveSet.findSensitiveTypedValues(F);
+      if (isWhiteListed(F))
+        continue;
+
+      findSensitiveTypedValues(F);
     }
 
-    propagateSensitivity(M);
     callInfos.makeCallInfoForEachCallInst(M, sensitiveSet, sensitiveTypes);
 
+    for (auto& acall : callInfos.data) {
+      if (acall.isDirectCall()) {
+        if (!acall.callSite.getCalledFunction()->isVarArg())
+          continue;
+
+        // Mark all variadic parameters to direct calls as sensitive:
+        for (unsigned argNo = acall.callSite.getCalledFunction()->getFunctionType()->getFunctionNumParams(); argNo < acall.getNumArgs(); argNo++)
+          makeValSensitive(acall.callSite.getArgOperand(argNo));
+      } else {
+        // Mark all inputs and outputs of the indirect call as sensitive.
+        makeValSensitive(&acall.callSite);
+        for (unsigned argNo = 0; argNo < acall.callSite.getNumArgOperands(); argNo++)
+          makeValSensitive(acall.callSite.getArgOperand(argNo));
+      }
+    }
+
+    // Duplicate functions and replace function references as necessary to propagate sensitivity appropriately.
+    //
+    // Functions whose pointers are passed to internal (instrumented) functions should conservatively be passed as
+    // a version that treats all arguments and its return value as sensitive, since we don't know all of the places
+    // where the function pointer may be invoked.  Similar reasoning applies to function pointers stored in local or
+    // global variables, assuming that those pointers are only ever invoked by internal functions.
+    //
+    // Functions whose pointers are passed to external (uninstrumented) functions should be duplicated and have any
+    // instrumentation stripped out of the duplicate.
+    //
+    // Functions that are called directly may need to be duplicated if they receive sensitive parameters so that
+    // appropriate sensitivity propagation can be performed in the duplicate.  Likewise, a duplicate is needed
+    // if the return value of the function is treated as sensitive at only some of the places where the function
+    // is invoked so that sensitivity can propagate backwards through the duplicate.
+
+    struct fp_func_repl {
+      Value *topLvlParent;
+      Value *op; //< The operation (i.e. CallInst or BitCast ConstantExpr) that actually references origF.
+      Function *origF;
+      Function *newF;
+
+      fp_func_repl(Value *topLvlParent_, Value *op_, Function *origF_)
+        : topLvlParent(topLvlParent_), op(op_), origF(origF_), newF(nullptr) {
+      }
+
+      std::string getAllSensitiveSigStr() {
+        stringstream sigSs;
+        sigSs << "_1_";
+        for (unsigned i = 0, N = origF->getFunctionType()->getFunctionNumParams(); i != N; i++) {
+          sigSs << "1";
+        }
+        return sigSs.str();
+      }
+
+      Function *insertAllSensitiveReplacement(StringRef stemNm, StringRef acallSig, SensitivityAnalysis& sa, bool unins) {
+        newF = findFunctionWithSameName(sa.newFunctions, stemNm.str(), acallSig);
+        if (newF != nullptr)
+          // An all-sensitive copy of this function has already been generated.
+          return nullptr;
+
+        DEBUG(dbgs() << "made new function\n");
+        newF = sa.duplicateFunction(*origF->getParent(), *origF, (stemNm + acallSig).str());
+        sa.copyInstructionSensitivity(*origF, *newF);
+        auto newFArg = newF->arg_begin();
+        // Mark all inputs and outputs of the duplicated function as sensitive:
+        for (unsigned argNo = 0; argNo < origF->getFunctionType()->getFunctionNumParams(); argNo++) {
+          sa.makeValSensitive(&*newFArg);
+          newFArg++;
+        }
+        if (!unins) {
+          for (auto& newFBB : *newF) {
+            for (auto& newFInst : newFBB) {
+              if (isa<ReturnInst>(&newFInst))
+                sa.makeValSensitive(&newFInst);
+            }
+          }
+        }
+
+        sa.newFunctions.insert(newF);
+
+        sa.callInfos.makeCallInfoForEachCallInst(*newF, sa.sensitiveSet, sa.sensitiveTypes);
+
+        return newF;
+      }
+
+      Function *genAllSensitiveReplacement(SensitivityAnalysis& sa) {
+        auto stemNm = origF->getName();
+        auto acallSig = getAllSensitiveSigStr();
+        return insertAllSensitiveReplacement(stemNm, acallSig, sa, false);
+      }
+
+      Function *genUninstrumentedReplacement(SensitivityAnalysis& sa) {
+        // If this is a call to an external function, that means the callee
+        // has not been instrumented with the DataShield sensitivity analysis.
+        // If it accepts function pointers as arguments, it should be passed
+        // pointers to uninstrumented functions.  The code below does not actually
+        // correctly implement this.  To enable this functionality, this ought
+        // to be separated out to a new loop below and revised to check for
+        // function pointer operands to call instructions.  Ideally, it should
+        // even walk def chains back to function pointer initializations of
+        // variables passed as operands.  To be complete, the uninstrumented
+        // function duplicates would also need to be revised to invoke
+        // uninstrumented sub-functions.
+        // Furthermore, such a callee (e.g. qsort) may shuffle elements within
+        // arguments passed to it, so perhaps the metadata for fields within
+        // structures passed to it needs to be cleared as well?  This
+        // might also be the case for whitelisted functions.
+        // Given the complexity of the above, we actually do instrument the
+        // new function internally instead of attempting to truly implement
+        // uninstrumented functions.  What "uninstrumented" denotes in this case
+        // is that the new function uses infinite bounds for all of its arguments.
+        // Even if the arguments are non-sensitive, many operations on them will
+        // still succeed due to the infinite bounds.  The exception is that
+        // if the program attempts to lookup bounds for fields within the arguments,
+        // those attempts will fail, since there are no bounds associated with
+        // those fields.
+        auto stemNm = origF->getName();
+        return insertAllSensitiveReplacement(stemNm, UNINSTRUMENTED_SUFFIX, sa, true);
+      }
+
+      bool needsAllSensitive() {
+        if (CallInst *ci = dyn_cast<CallInst>(topLvlParent)) {
+          Function *cf = ci->getCalledFunction();
+          if (cf == nullptr) {
+            // Assume that indirect calls are to internal, instrumented functions.
+            return true;
+          } else if (cf->isDeclaration()) {
+            // Needs uninstrumented.
+            return false;
+          } else {
+            return true;
+          }
+        } else {
+          return true;
+        }
+      }
+
+      /**
+       * Return a Function pointer if it needs to be
+       * recursively analyzed.
+       */
+      Function *genReplacement(SensitivityAnalysis& sa) {
+        if (needsAllSensitive()) {
+          return genAllSensitiveReplacement(sa);
+        } else {
+          return genUninstrumentedReplacement(sa);
+        }
+      }
+
+      void replaceOp(SensitivityAnalysis& sa) {
+        if (GlobalVariable *gv = dyn_cast<GlobalVariable>(topLvlParent)) {
+          if (op == gv) {
+            gv->setInitializer(newF);
+          } else {
+            Constant *C = dyn_cast<Constant>(op);
+            bool FoundOrig = false;
+            for (auto& COp : C->operands()) {
+              if (COp == origF)
+                FoundOrig = true;
+            }
+            if (FoundOrig)
+              C->handleOperandChange(origF, newF);
+            // otherwise, some other replacement must have already replaced this.
+          }
+        } else if (!isa<GlobalValue>(op) && isa<Constant>(op)) {
+          auto replArg = [&](User *U0, unsigned i, Value *op_) {
+            ConstantExpr *op = dyn_cast<ConstantExpr>(op_);
+            assert(op);
+            unsigned opIdx = 0;
+            for (; opIdx != op->getNumOperands(); opIdx++) {
+              if (op->getOperand(opIdx) == origF)
+                break;
+            }
+            if (opIdx == op->getNumOperands())
+              return;
+            Value *newOp = op->getWithOperandReplaced(opIdx, newF);
+            if (ConstantExpr *ce = dyn_cast<ConstantExpr>(U0))
+              ce->handleOperandChange(op, newOp);
+            else
+              U0->setOperand(i, newOp);
+            if (sa.sensitiveSet.count(op))
+              sa.makeValSensitive(newOp);
+          };
+          if (CallInst *ci = dyn_cast<CallInst>(topLvlParent)) {
+            for (unsigned i = 0; i < ci->getNumArgOperands(); i++) {
+              Value *arg = ci->getArgOperand(i);
+              if (arg == op)
+                replArg(ci, i, op);
+            }
+          } else {
+            User *inst = dyn_cast<User>(topLvlParent);
+            assert(inst);
+            for (unsigned i = 0; i < inst->getNumOperands(); i++) {
+              Value *arg = inst->getOperand(i);
+              if (arg == op)
+                replArg(inst, i, op);
+            }
+          }
+        } else {
+          Instruction *inst = dyn_cast<Instruction>(topLvlParent);
+          assert(inst);
+          assert(op == inst);
+          if (CallInst *ci = dyn_cast<CallInst>(topLvlParent)) {
+            for (unsigned i = 0; i < ci->getNumArgOperands(); i++) {
+              Value *arg = ci->getArgOperand(i);
+              if (arg == origF)
+                ci->setArgOperand(i, newF);
+            }
+          } else {
+            inst->replaceUsesOfWith(origF, newF);
+          }
+        }
+      }
+    };
+
+    std::vector<fp_func_repl> newFPFuncs;
+
+    // Return true if op is a function pointer, false otherwise.
+    auto addFPReplsOp = [&](Value *topLvlValue, Value *user, Value *op) {
+      Type *opTy = op->getType();
+      if (!(opTy->isPointerTy() && opTy->getPointerElementType()->isFunctionTy()))
+        return false;
+
+#ifdef DBG_FP_REPL
+      DEBUG(dbgs() << "     - it is a function pointer.\n");
+#endif
+
+      Function *origF = dyn_cast<Function>(op);
+      if (origF == nullptr)
+        return true;
+
+      if (origF->getFunctionType()->isVarArg())
+        // We don't handle variadic functions passed as pointers.
+        return true;
+
+      if (origF->isDeclaration())
+        // This is just a function declaration.  It cannot be instrumented.
+        return true;
+
+      if (newFunctions.count(origF))
+        // Skip over functions that were dynamically generated by this pass.
+        return true;
+
+#ifdef DBG_FP_REPL
+      DEBUG(dbgs() << "     - registered replacement op.\n");
+#endif
+      newFPFuncs.emplace_back(topLvlValue, user, origF);
+
+      return true;
+    };
+
+    auto addFPReplsGVInit = [&](GlobalVariable *topLvlValue, Constant *C) {
+      std::vector<std::pair<Value *, Constant *>> work;
+      work.emplace_back(topLvlValue, C);
+      do {
+        std::set<Value *> visited;
+        Value *op = work.back().first;
+        Constant *curr = work.back().second;
+        work.pop_back();
+        if (auto cs = dyn_cast<ConstantStruct>(curr)) {
+          for (unsigned i = 0, e = cs->getNumOperands(); i != e; ++i) {
+            auto ele = cs->getOperand(i);
+            if (visited.insert(ele).second)
+              work.emplace_back(cs, ele);
+          }
+        } else if (auto ce = dyn_cast<ConstantExpr>(curr)) {
+          auto op0 = ce->getOperand(0);
+          work.emplace_back(ce, op0);
+        } else if (auto array = dyn_cast<ConstantArray>(curr)) {
+          for (unsigned i = 0, e = array->getNumOperands(); i != e; ++i) {
+            auto ele = array->getOperand(i);
+            if (visited.insert(ele).second)
+              work.emplace_back(array, ele);
+          }
+        } else {
+          addFPReplsOp(topLvlValue, op, curr);
+        }
+      } while (!work.empty());
+    };
+
+    // Find function pointers in global variable initializers.
+    for (GlobalVariable& g : M.globals()) {
+      if (!g.hasInitializer())
+        continue;
+
+      addFPReplsGVInit(&g, g.getInitializer());
+    }
+
+    auto addFPRepls = [&](User *inst_, Value *op_) {
+      std::vector<std::pair<User *, Value *>> work;
+      work.emplace_back(inst_, op_);
+      do {
+        User *inst = work.back().first;
+        Value *op = work.back().second;
+        work.pop_back();
+#ifdef DBG_FP_REPL
+        DEBUG(dbgs() << " - visiting op "; op->dump(); dbgs() << " in user "; inst->dump(); dbgs() << "\n");
+#endif
+        if (auto ce = dyn_cast<ConstantExpr>(op)) {
+          for (auto& ceOp : ce->operands()) {
+#ifdef DBG_FP_REPL
+            DEBUG(dbgs() << "   - checking subexp "; ce->dump(); dbgs() << " sub-op "; ceOp->dump(); dbgs() << "\n");
+#endif
+            if (!addFPReplsOp(inst, ce, &*ceOp)) {
+              work.emplace_back(ce, &*ceOp);
+            }
+          }
+        } else {
+          addFPReplsOp(inst, inst, op);
+        }
+      } while(!work.empty());
+    };
+
+    auto findNeededFPFuncRepls = [&](Function& F) {
+      for (auto I = inst_begin(F), E = inst_end(F); I != E; I++) {
+#ifdef DBG_FP_REPL
+        DEBUG(dbgs() << "Searching for function pointers in "; I->dump(); dbgs() << "\n");
+#endif
+        if (CallInst *ci = dyn_cast<CallInst>(&*I)) {
+          for (auto& arg : ci->arg_operands())
+            addFPRepls(ci, &*arg);
+        } else if (StoreInst *si = dyn_cast<StoreInst>(&*I)) {
+          Value *valOp = si->getValueOperand();
+          addFPRepls(si, valOp);
+        } else if (PHINode *phi = dyn_cast<PHINode>(&*I)) {
+          for (auto& op : phi->incoming_values()) {
+            addFPRepls(phi, op);
+          }
+        } else if (SelectInst *sel = dyn_cast<SelectInst>(&*I)) {
+          addFPRepls(sel, sel->getFalseValue());
+          addFPRepls(sel, sel->getTrueValue());
+        } else {
+          for (auto& op : I->operands()) {
+            addFPRepls(&*I, op);
+          }
+        }
+      }
+    };
+
+    // The purpose of this first loop is to find invocations of function pointers,
+    // match those with stores of function pointers with identical signatures, and
+    // convert those function pointers to point to an "all-sensitive" instrumented
+    // function.  It also sets the inputs and outputs of the function pointer
+    // invocation to be all-sensitive.  However, if a function pointer is passed as
+    // an argument to an external function, then that pointer will be replaced with
+    // one to an uninstrumented duplicate instead.
+    for (auto& F : M)
+      findNeededFPFuncRepls(F);
+
+    std::vector<Function *> genFuncs;
+    do {
+      genFuncs.clear();
+      // Generate necessary duplicate functions.  This is broken out
+      // into a separate loop to avoid disrupting the iterator of all
+      // functions in a module above.
+      for (auto& repl : newFPFuncs) {
+        Function *newF = repl.genReplacement(*this);
+        if (newF)
+          genFuncs.push_back(newF);
+      }
+      for (Function *F : genFuncs)
+        findNeededFPFuncRepls(*F);
+    } while(!genFuncs.empty());
+
+    // Actually perform function pointer replacements.
+    for (auto& repl : newFPFuncs)
+      repl.replaceOp(*this);
+
+    // Propagate sensitivity through direct calls.
+    // FIXME: handle functions to call computed from expressions directly included in CallInstructions
     vector<Function*> newFsThisLoop;
     do {
       sensitiveSet.isChanged = false;
       newFsThisLoop.clear();
-      propagateSensitivity(M);
       for (auto& acall : callInfos.data) {
         if (acall.isDirectCall() && !acall.isCallToExternalFunction()) {
-          DEBUG(dbgs() << "do we need a new function for: " << acall.getCallee()->getName() << "\n");
+          DEBUG(dbgs() << "do we need a new function for " << acall.getCallee()->getName() << " @ " << acall.callSite.getName() << " in " << acall.callSite.getParent()->getParent()->getName() << "\n");
           if (acall.needsNewFunction()) {
             DEBUG(dbgs() << "yes\n");
           } else {
             DEBUG(dbgs() << "no\n");
           }
         }
-        if (acall.needsNewFunction() && acall.isDirectCall() && !acall.isCallToExternalFunction()) {
-          DEBUG(dbgs() << "duplicating: " << acall.getCallee()->getName() + acall.getSignatureString() << "\n");
-          auto newName = acall.getCallee()->getName().str() + acall.getSignatureString();
-          if (auto existingF = findFunctionWithSameName(newFunctions, newName)) {
-            DEBUG(dbgs() << "we already had it\n");
-            //if (acall.replacement != existingF) {
+        if (acall.isDirectCall() && !acall.isCallToExternalFunction()) {
+          if (acall.needsNewFunction() && !isWhiteListed(*acall.getCallee())) {
+            DEBUG(dbgs() << "duplicating: " << acall.getCallee()->getName() + acall.getSignatureString(sensitiveSet) << "\n");
+            if (auto existingF = findFunctionWithSameName(newFunctions, acall.getCallee()->getName().str(), acall.getSignatureString(sensitiveSet))) {
+              DEBUG(dbgs() << "we already had it\n");
               acall.replacement = existingF; // we already cloned the appropriate function
-              propagateAcrossCallBoundary(existingF, acall);
-              propagateSensitivity(acall.parent);
-            //}
-          } else {
-            DEBUG(dbgs() << "made new function\n");
-            auto newF = duplicateFunction(M, *acall.getCallee(), newName);
-            acall.replacement = newF;
-            //replacedFunctions.insert(acall.getCallee());
-            DEBUG(dbgs() << newF->getName() << "\n");
-            if (UseMbedtlsAnnotations && newName == "x509_crt_verify_top_0_11111000") {
-              makeNamedVarSensitiveInFunction("hash", "x509_crt_verify_top_0_11111000");
+            } else {
+              DEBUG(dbgs() << "made new function\n");
+              auto stemNm = acall.getCallee()->getName();
+              auto newF = duplicateFunction(M, *acall.getCallee(), (stemNm + "_propagating").str());
+              copyInstructionSensitivity(*acall.getCallee(), *newF);
+              //findSensitiveTypedValues(*newF);
+              // Replace the function now so that when we propagate sensitivity within it,
+              // if a sensitive value is returned, that sensitivity will be propagated to
+              // the call site.  The call site sensitivty is used below to compute the
+              // signature for the new function.
+              acall.replacement = newF;
+              newFsThisLoop.push_back(newF);
+              newFunctions.insert(newF);
+              auto newFArg = newF->arg_begin();
+              for (unsigned argNo = 0; argNo < acall.getNumArgs(); argNo++) {
+                if (acall.isArgSensitive(argNo)) {
+                  makeValSensitive(&*newFArg);
+                }
+                newFArg++;
+              }
+              // Propagate sensitivity from call site into callee:
+              if (acall.isRetSensitive(sensitiveSet)) {
+                for (auto& newFBB : *newF) {
+                  for (auto& newFInst : newFBB) {
+                    if (isa<ReturnInst>(&newFInst))
+                      makeValSensitive(&newFInst);
+                  }
+                }
+              }
+              std::string newName = (stemNm + acall.getSignatureString(sensitiveSet)).str();
+              newF->setName(newName);
+              DEBUG(dbgs() << newF->getName() << "\n");
+              if (UseMbedtlsAnnotations && newName == "x509_crt_verify_top_0_11111000") {
+                makeNamedVarSensitiveInFunction("hash", "x509_crt_verify_top_0_11111000");
+              }
+              if (UseMbedtlsAnnotations && newName == "x509_crt_verify_top_1_11111111") {
+                makeNamedVarSensitiveInFunction("hash", "x509_crt_verify_top_1_11111111");
+              }
             }
-            if (UseMbedtlsAnnotations && newName == "x509_crt_verify_top_1_11111111") {
-              makeNamedVarSensitiveInFunction("hash", "x509_crt_verify_top_1_11111111");
-            }
-            propagateAcrossCallBoundary(newF, acall);
-            propagateSensitivity(*newF);
-            propagateSensitivity(acall.parent);
-            newFsThisLoop.push_back(newF);
-            newFunctions.insert(newF);
+
+            // Propagate sensitivity back to caller through return value:
+            if (sensitiveSet.count(acall.replacement))
+              makeValSensitive(&acall.callSite);
           }
-        } 
+
+          // Propagate sensitivity back to caller through parameters:
+          for (unsigned argNo = 0; argNo < acall.getNumArgs(); argNo++)
+            if (acall.isArgSensitiveAtCallee(argNo)) {
+              auto argOp = acall.callSite.getArgOperand(argNo);
+              DEBUG(dbgs() << "Propagating arg sensitivity to caller for arg " << argNo << " to " << argOp->getName() << "\n");
+              makeValSensitive(argOp);
+            }
+        }
       }
       for (auto newF : newFsThisLoop) {
-        sensitiveSet.findSensitiveTypedValues(*newF);
-        propagateSensitivity(*newF);
         callInfos.makeCallInfoForEachCallInst(*newF, sensitiveSet, sensitiveTypes);
       }
-    } while (sensitiveSet.isChanged);
+    } while (!newFsThisLoop.empty() || sensitiveSet.isChanged);
 
     if (UseMbedtlsAnnotations) {
       doTLSPRFhack();
@@ -2077,17 +3079,64 @@ public:
 
 class BoundsAnalysis {
   Module& M;
+  ObjectSizeOffsetEvaluator ObjSizeEval;
   const ValueSet& sensitiveSet;
-  Function *setBoundsDebug, *getBoundsDebug, *setFnArgBoundsDebug, *getFnArgBoundsDebug, *abortDebug;
-  Function *setBounds, *getBounds, *setFnArgBounds, *getFnArgBounds, *abortFn, *dsSafeCopyArgv;
+  const std::set<const Instruction *> &allocaAccesses;
+  Function *getBoundsDebug, *getFnArgBoundsDebug;
+  Function *getBounds, *getFnArgBounds, *abortFn, *dsSafeCopyArgv;
+  Value *setFnArgBounds, *setBounds, *setBoundsDebug, *setFnArgBoundsDebug, *abortDebug, *pushFnVarargBounds, *popFnVarargBounds, *popFnRemainingVarargBounds;
   Constant* infiniteBounds;
+  Constant* invalidBounds;
   Constant* emptyBounds;
   BoundsMap globalBoundsMap;
+  
+  raw_fd_ostream *infBndLogFile;
+  std::unordered_set<const Value *> infBndLoggedVals;
+  /// Return true if the log file is open when this function returns.
+  bool logInfBndInit(Twine filename) {
+    if (infBndLogFile != nullptr)
+      return true;
+    std::error_code EC;
+    infBndLogFile = new raw_fd_ostream(filename.str(), EC, sys::fs::F_RW | sys::fs::F_Text);
+    if (EC) {
+      // It may not be possible to create a file in certain source directories.
+      delete infBndLogFile;
+      infBndLogFile = nullptr;
+      return false;
+    }
+    *infBndLogFile << "LIST of POINTERS WITH INFINITE BOUNDS\n\n";
+    return true;
+  }
+  void logInfBnd(Value* val, Instruction *InsertPt) {
+    if (!logInfBndInit(M.getName() + "__infiniteBoundsList"))
+      return;
+    if (!infBndLoggedVals.insert(val).second)
+      return;
+    raw_fd_ostream& file = *infBndLogFile;
+    file << "\nPointer: ";
+    if (val->getType()->isPointerTy() && val->getType()->getPointerElementType()->isFunctionTy()) {
+      val->printAsOperand(file);
+      if (InsertPt) {
+	file << " in function: ";
+	InsertPt->getFunction()->printAsOperand(file);
+      }
+    } else {
+      val->print(file);
+      if (InsertPt) {
+	file << " in function: ";
+	InsertPt->getFunction()->printAsOperand(file);
+      }
+    }
+  }
+  void logInfBnd(Value* val, IRBuilder<>& IRB) {
+    auto insertPt = IRB.GetInsertPoint();
+    logInfBnd(val, insertPt.getNodePtr()->isKnownSentinel()? nullptr : &*insertPt);
+  }
   void getRuntimeFunctions() {
 
     // debug versions
     auto setBoundsDebugTy = FunctionType::get(voidTy, {int8PtrTy, boundsTy, int8PtrTy, int64Ty}, false);
-    setBoundsDebug = dyn_cast<Function>(M.getOrInsertFunction("__ds_set_bounds_debug", setBoundsDebugTy));
+    setBoundsDebug = M.getOrInsertFunction("__ds_set_bounds_debug", setBoundsDebugTy);
     assert(setBoundsDebug && "should be able to get runtime functions");
 
     auto getBoundsDebugTy = FunctionType::get(boundsTy, {int8PtrTy, int8PtrTy, int64Ty}, false);
@@ -2099,24 +3148,38 @@ class BoundsAnalysis {
     assert(getFnArgBoundsDebug && "should be able to get runtime functions");
 
     auto setFnArgBoundsDebugTy = FunctionType::get(voidTy, {int64Ty, boundsTy, int8PtrTy}, false);
-    setFnArgBoundsDebug = dyn_cast<Function>(M.getOrInsertFunction("__ds_set_fn_arg_bounds_debug", setFnArgBoundsDebugTy));
+    setFnArgBoundsDebug = M.getOrInsertFunction("__ds_set_fn_arg_bounds_debug", setFnArgBoundsDebugTy);
     assert(setFnArgBoundsDebug && "should be able to get runtime functions");
 
     auto abortDebugTy = FunctionType::get(voidTy, {boundsTy, int8PtrTy, int8PtrTy, int8PtrTy, int64Ty}, false);
-    abortDebug = dyn_cast<Function>(M.getOrInsertFunction("__ds_abort_debug", abortDebugTy));
+    abortDebug = M.getOrInsertFunction("__ds_abort_debug", abortDebugTy);
     assert(abortDebug && "should be able to get runtime functions");
+
+    auto pushFnVarargBoundsTy = FunctionType::get(voidTy, {boundsTy}, false);
+    pushFnVarargBounds = M.getOrInsertFunction("__ds_push_fn_vararg_bounds", pushFnVarargBoundsTy);
+    assert(pushFnVarargBounds && "should be able to get runtime functions");
+
+    auto popFnVarargBoundsTy = FunctionType::get(boundsTy, {}, false);
+    popFnVarargBounds = M.getOrInsertFunction("__ds_pop_fn_vararg_bounds", popFnVarargBoundsTy);
+    assert(popFnVarargBounds && "should be able to get runtime functions");
+
+    auto popFnRemainingVarargBoundsTy = FunctionType::get(voidTy, {}, false);
+    popFnRemainingVarargBounds = M.getOrInsertFunction("__ds_pop_fn_remaining_vararg_bounds", popFnRemainingVarargBoundsTy);
+    assert(popFnRemainingVarargBounds && "should be able to get runtime functions");
 
     // non debug versions
     auto getFnArgBoundsTy = FunctionType::get(boundsTy, {int64Ty}, false);
     getFnArgBounds = dyn_cast<Function>(M.getOrInsertFunction("__ds_get_fn_arg_bounds", getFnArgBoundsTy));
     assert(getFnArgBounds && "should be able to get runtime functions");
 
+    // SROA (maybe, or some other pass?) flattens the bounds arg for __ds_set_fn_arg_bounds and __ds_set_bounds into two scalar args,
+    // so getOrInsertFunction returns a cast.
     auto setFnArgBoundsTy = FunctionType::get(voidTy, {int64Ty, boundsTy}, false);
-    setFnArgBounds = dyn_cast<Function>(M.getOrInsertFunction("__ds_set_fn_arg_bounds", setFnArgBoundsTy));
+    setFnArgBounds = M.getOrInsertFunction("__ds_set_fn_arg_bounds", setFnArgBoundsTy);
     assert(setFnArgBounds && "should be able to get runtime functions");
 
     auto setBoundsTy = FunctionType::get(voidTy, {int8PtrTy, boundsTy}, false);
-    setBounds = dyn_cast<Function>(M.getOrInsertFunction("__ds_set_bounds", setBoundsTy));
+    setBounds = M.getOrInsertFunction("__ds_set_bounds", setBoundsTy);
     assert(setBounds && "should be able to get runtime functions");
 
     auto getBoundsTy = FunctionType::get(boundsTy, {int8PtrTy}, false);
@@ -2131,9 +3194,25 @@ class BoundsAnalysis {
     dsSafeCopyArgv = dyn_cast<Function>(M.getOrInsertFunction("__ds_copy_argv_to_safe_heap", dsCopyArgvTy));
     assert(dsSafeCopyArgv && "should be able to get rt functions");
   }
-  void searchForGlobalsIn(Constant* curr, IRBuilder<>& IRB, Value* dbgStr, DataLayout& DL, set<Value*>& visited, Value* ptrAddr = nullptr) {
-      if (visited.count(curr)) { return; }
-      visited.insert(curr);
+  void searchForGlobalsIn(Constant* curr, IRBuilder<>& IRB, Value* dbgStr, const DataLayout& DL, set<Value*>& visited, Value* ptrAddr = nullptr) {
+    // This used to use a set to track which values have been previously visited when setting
+    // bounds for global variable initializers.  This could result in some bounds not getting set
+    // when a single global is referenced from multiple global initializers, which is why that
+    // logic was removed.
+    auto handleConst = [&](Constant *op0, bool simpleConst) {
+      if (op0->getType()->isPointerTy() || op0->getType()->isAggregateType()) {
+        if (auto nextGlobal = dyn_cast<GlobalVariable>(op0)) {
+          if (setGlobalSection(nextGlobal)) {
+            insertConstantBoundsStore(nextGlobal, IRB, dbgStr, DL, ptrAddr);
+            lookForBoundsInInitializer(nextGlobal, IRB, dbgStr, DL, visited, ptrAddr);
+          }
+        } else {
+          insertConstantBoundsStore(op0, IRB, dbgStr, DL, ptrAddr);
+          if (!simpleConst) searchForGlobalsIn(op0, IRB, dbgStr, DL, visited, ptrAddr);
+        }
+      }
+    };
+
       if (auto cs = dyn_cast<ConstantStruct>(curr)) {
         //dbgs() << "is constant struct\n";
         auto structTy = cs->getType();
@@ -2149,9 +3228,14 @@ class BoundsAnalysis {
             auto offV = ConstantInt::get(int64Ty, off);
             auto eleAddr = IRB.CreateGEP(ptrAddr, offV, "element_address");
             if (auto nextGlobal = dyn_cast<GlobalVariable>(ele)) {
-              setGlobalSection(nextGlobal);
-              insertConstantBoundsStore(nextGlobal, IRB, dbgStr, DL, eleAddr);
-              lookForBoundsInInitializer(nextGlobal, IRB, dbgStr, DL, visited, eleAddr);
+              if (setGlobalSection(nextGlobal)) {
+                insertConstantBoundsStore(nextGlobal, IRB, dbgStr, DL, eleAddr);
+                // Commenting the following eliminates recursion into global variable initializers
+                // when a global variable is referenced within a different initializer.  The initializer
+                // should only be visited from the top level when each global variable is being visited
+                // in turn.
+                //lookForBoundsInInitializer(nextGlobal, IRB, dbgStr, DL, visited, eleAddr);
+              }
             } else {
               // TODO we still need to set the bounds even if its not a named global
               // because you can assign a pointer to point to an unnamed element
@@ -2165,16 +3249,15 @@ class BoundsAnalysis {
       } else if (auto ce = dyn_cast<ConstantExpr>(curr)) {
         // TODO non all zeros GEP?
         auto op0 = ce->getOperand(0);
-        if (op0->getType()->isPointerTy() || op0->getType()->isAggregateType()) {
-          if (auto nextGlobal = dyn_cast<GlobalVariable>(op0)) {
-            setGlobalSection(nextGlobal);
-            insertConstantBoundsStore(nextGlobal, IRB, dbgStr, DL, ptrAddr);
-            lookForBoundsInInitializer(nextGlobal, IRB, dbgStr, DL, visited, ptrAddr);
-          } else {
-            insertConstantBoundsStore(op0, IRB, dbgStr, DL, op0);
-            searchForGlobalsIn(op0, IRB, dbgStr, DL, visited, op0);
-          }
-        }
+        handleConst(op0, false);
+#if 0
+        // This code may not currently have any effect, because
+        // it seems to only applies to fields within objects and the rest
+        // of DataShield does not currently support narrowing of bounds
+        // for sub-objects.
+      } else if (auto c = dyn_cast<Constant>(curr)) {
+        handleConst(c, true);
+#endif
       } else if (auto array = dyn_cast<ConstantArray>(curr)) {
         //dbgs() << "is constant data array\n";
         // loop over the elements and store their bounds if they are pointers
@@ -2190,9 +3273,10 @@ class BoundsAnalysis {
             auto offV = ConstantInt::get(int64Ty, off * i);
             auto eleAddr = IRB.CreateGEP(ptrAddr, offV, "element_address");
             if (auto nextGlobal = dyn_cast<GlobalVariable>(ele)) {
-              setGlobalSection(nextGlobal);
-              insertConstantBoundsStore(nextGlobal, IRB, dbgStr, DL, eleAddr);
-              lookForBoundsInInitializer(nextGlobal, IRB, dbgStr, DL, visited, eleAddr);
+              if (setGlobalSection(nextGlobal)) {
+                insertConstantBoundsStore(nextGlobal, IRB, dbgStr, DL, eleAddr);
+                lookForBoundsInInitializer(nextGlobal, IRB, dbgStr, DL, visited, eleAddr);
+              }
             } else {
               // TODO we still need to set the bounds even if its not a named global
               // because you can assign a pointer to point to an unnamed element
@@ -2206,10 +3290,15 @@ class BoundsAnalysis {
       }
   }
 
-  void setGlobalSection(GlobalVariable* global) {
+  bool setGlobalSection(GlobalVariable* global) {
     if (global->getLinkage() == GlobalValue::LinkageTypes::ExternalLinkage) {
       if (global->getName() == "stdout") {
-        return;
+        return true;
+      } else if (global->hasName() && global->getName() == "__ds_environ") {
+        // FIXME: What is the appropriate section for __ds_environ?
+        // It was sometimes being placed into .sensitive1, which is read-only
+        // and was resulting in errors on attempted writes.
+        global->setSection(".sensitive2");
       } else {
         global->setSection(".sensitive1");
       }
@@ -2221,8 +3310,13 @@ class BoundsAnalysis {
     } else if (global->getLinkage() == GlobalValue::LinkageTypes::InternalLinkage) {
       global->setSection(".sensitive4");
     } else {
-      llvm_unreachable("it should have been one of those linkages?");
+      errs() << "Ignoring global with unrecognized linkage type: ";
+      global->print(errs());
+      errs() << "\n";
+      return false;
+      //llvm_unreachable("it should have been one of those linkages?");
     }
+    return true;
   }
   bool isBasedOnExternal(Value* constant) {
     if (auto bc = dyn_cast<BitCastOperator>(constant)) {
@@ -2237,7 +3331,7 @@ class BoundsAnalysis {
     return false;
   }
 
-  void insertConstantBoundsStore(Constant* constant, IRBuilder<>& IRB, Value* dbgStr, DataLayout& DL, Value* ptrAddr) {
+  void insertConstantBoundsStore(Constant* constant, IRBuilder<>& IRB, Value* dbgStr, const DataLayout& DL, Value* ptrAddr) {
     auto constantTy = constant->getType();
     Value *bounds = nullptr;
     DEBUG(dbgs() << "insertConstantBoundsStore: constant:\n");
@@ -2250,28 +3344,45 @@ class BoundsAnalysis {
       bounds = infiniteBounds;
     } else if (isa<ConstantPointerNull>(constant)) {
       bounds = emptyBounds;
-    } else if (constantTy->isPointerTy() || constantTy->isAggregateType()) {
-      if (auto pTy = dyn_cast<PointerType>(constantTy)) {
-        constantTy = pTy->getElementType();
-        auto size = DL.getTypeStoreSize(constant->getType());
-        auto sizeV = ConstantInt::get(int64Ty, size);
-        bounds = createBounds(IRB, constant, sizeV);
-      } else {
-        auto size = DL.getTypeStoreSize(constant->getType());
-        auto sizeV = ConstantInt::get(int64Ty, size);
-        bounds = createBounds(IRB, ptrAddr, sizeV);
-      }
     } else {
-      return; // don't store bounds for other things like scalars
+      if (constantTy->isPointerTy() || constantTy->isAggregateType()) {
+        if (auto pTy = dyn_cast<PointerType>(constantTy)) {
+          // FIXME: This computes the size of the containing object, not necessarily the specific object
+          // pointed to.  For example, even if the pointer is to a specific array entry, this function
+          // will compute the size of the entire array.  This may result in false negatives during bounds
+          // checking.  These bounds may overlap adjacent objects, since the base of the bounds is determined
+          // from the pointer, which may point to the middle of the object.
+          SizeOffsetEvalType SizeOffset = ObjSizeEval.compute(constant);
+
+          Value *sizeV = nullptr;
+          if (ObjSizeEval.knownSize(SizeOffset)) {
+            sizeV = SizeOffset.first;
+          } else {
+            constantTy = pTy->getElementType();
+            auto size = DL.getTypeStoreSize(constantTy);
+            sizeV = ConstantInt::get(int64Ty, size);
+          }
+          bounds = createBounds(IRB, constant, sizeV);
+        } else {
+          auto size = DL.getTypeStoreSize(constantTy);
+          auto sizeV = ConstantInt::get(int64Ty, size);
+          bounds = createBounds(IRB, ptrAddr, sizeV);
+        }
+      } else {
+        return; // don't store bounds for other things like scalars
+      }
     }
     auto id = ConstantInt::get(int64Ty, IDCounter++);
+    if (bounds == infiniteBounds) {
+      logInfBnd(ptrAddr, IRB);
+    }
     if (DebugMode) {
       IRB.CreateCall(setBoundsDebug, {ptrAddr, bounds, dbgStr, id});
     } else {
       IRB.CreateCall(setBounds, {ptrAddr, bounds});
     }
   }
-  void lookForBoundsInInitializer(GlobalVariable* global, IRBuilder<>& IRB, Value* dbgStr, DataLayout& DL, set<Value*>& visited, Value* ptrAddr = nullptr) {
+  void lookForBoundsInInitializer(GlobalVariable* global, IRBuilder<>& IRB, Value* dbgStr, const DataLayout& DL, set<Value*>& visited, Value* ptrAddr = nullptr) {
     if (global->hasInitializer()) {
       auto init = global->getInitializer();
       auto baseAddr = IRB.CreateBitCast(global, int8PtrTy, "as_int8ptr");
@@ -2284,7 +3395,7 @@ class BoundsAnalysis {
     // a table look up
 
     set<Value*> visited;
-    auto DL = M.getDataLayout();
+    auto& DL = M.getDataLayout();
     auto globalBoundsInitFnTy = FunctionType::get(voidTy, {}, false);
     auto globalBoundsInitFn = dyn_cast<Function>(M.getOrInsertFunction("__ds_init_global_bounds", globalBoundsInitFnTy));
     assert(globalBoundsInitFn && "should be able to create global bounds init funciton");
@@ -2296,11 +3407,15 @@ class BoundsAnalysis {
 
     dbgs() << "begin createGlobalBounds\n";
     for (auto& g : M.globals()) {
-      globalBoundsMap[&g] = infiniteBounds;  
+      // FIXME: Initialize bounds based on the addresses of globals:
+      PointerType *ptrType = dyn_cast<PointerType>(g.getType());
+      assert(ptrType && "Global must have pointer type.");
+      globalBoundsMap[&g] = createBounds(IRB, &g, ConstantInt::get(int64Ty, DL.getTypeStoreSize(ptrType->getPointerElementType())));
       if (sensitiveSet.count(&g)) {
         //dbgs() << "sensitive\n";
-        setGlobalSection(&g);
-        lookForBoundsInInitializer(&g, IRB, dbgStr, DL, visited);
+        if (setGlobalSection(&g)) {
+          lookForBoundsInInitializer(&g, IRB, dbgStr, DL, visited);
+        }
       } else {
         //dbgs() << "not sensitive\n";
       }
@@ -2327,6 +3442,9 @@ class BoundsAnalysis {
             if (sensitiveSet.count(argv)) {
               auto bounds = infiniteBounds; // FIX ME
               auto two = ConstantInt::get(int64Ty, 2);
+              if (bounds == infiniteBounds) {
+                logInfBnd(argv, IRB);
+              }
               IRB.CreateCall(setFnArgBounds, {two, bounds});
               auto newArgv = IRB.CreateCall(dsSafeCopyArgv, {mainCall->getArgOperand(0), mainCall->getArgOperand(1)});
               mainCall->replaceUsesOfWith(mainCall->getArgOperand(1), newArgv);
@@ -2346,16 +3464,19 @@ class BoundsAnalysis {
     }
 
     if (isa<LandingPadInst>(basedOnValue)) {
+      logInfBnd(basedOnValue, insertionPoint);
       return infiniteBounds;
     }
 
     if (isa<ConstantInt>(basedOnValue)) {
+      logInfBnd(basedOnValue, insertionPoint);
       return infiniteBounds;
     }
 
     if (auto cnst = dyn_cast<ConstantExpr>(basedOnValue)) {
       switch (cnst->getOpcode()) {
         case Instruction::IntToPtr:
+	  logInfBnd(basedOnValue, insertionPoint);
           return infiniteBounds;
         default:
           cnst->dump();
@@ -2363,10 +3484,12 @@ class BoundsAnalysis {
       }
     }
     if (isa<IntToPtrInst>(basedOnValue)) {
+      logInfBnd(basedOnValue, insertionPoint);
       return infiniteBounds;
     }
 
     if (isa<UndefValue>(basedOnValue)) {
+      logInfBnd(basedOnValue, insertionPoint);
       return infiniteBounds;
     }
 
@@ -2379,7 +3502,9 @@ class BoundsAnalysis {
           && call->getCalledFunction()->getName() != "strdup") {
         if (!boundsMap[call]) {
           call->dump();
-          llvm_unreachable("all malloc like fn should be in bounds map");
+          errs() << "all malloc like fn should be in bounds map\n";
+	  logInfBnd(basedOnValue, insertionPoint);
+          return infiniteBounds;
         }
         return boundsMap[call];
       }
@@ -2388,10 +3513,21 @@ class BoundsAnalysis {
         return boundsMap[call];
       }
 
-      // strchr just returns a pointer to within the original string so return the original string's bounds
+      // strchr and other similar routines just returns a pointer to within the original string so return the original string's bounds.
+      // Keep in sync with list in SensitivityAnalysis::makeValSensitive.
       auto calledF = call->getCalledFunction();
-      if (calledF && calledF->getName() == "strchr") {
-         return getOrLoadBounds(call->getArgOperand(0), boundsMap, TLI, DebugString, insertionPoint);
+      if (calledF) {
+        if (calledF->getName() == "strchr" ||
+	    calledF->getName() == "strrchr")
+          return getOrLoadBounds(call->getArgOperand(0), boundsMap, TLI, DebugString, insertionPoint);
+        if (calledF->isDeclaration() && calledF->getName() != "__ds_copy_environ_to_safe" &&
+	    // This assumes that safe replacement functions that return pointers
+	    // initialize the associated bounds.
+	    !call->getName().endswith("_safe")) {
+          // External functions except __ds_copy_environ_to_safe are not instrumented, so they do not generate bounds.
+	  logInfBnd(basedOnValue, insertionPoint);
+          return infiniteBounds;
+	}
       }
 
       // load the bounds immediatelly following the call
@@ -2433,6 +3569,7 @@ class BoundsAnalysis {
                     || innerPtr->getName() == "stderr"
                     ) )
             {
+	      logInfBnd(basedOnValue, insertionPoint);
               return infiniteBounds;
             }
          // }
@@ -2441,13 +3578,21 @@ class BoundsAnalysis {
 
       // llvm does this weird thing where it turns a switch over global variables into
       // a new global variable "switch.table.xxx"  we do not support this
-      if (ptrOp->hasName() && ptrOp->getName().startswith("switch.")) { return infiniteBounds; }
+      if (ptrOp->hasName() && ptrOp->getName().startswith("switch.")) {
+	logInfBnd(basedOnValue, insertionPoint);
+	return infiniteBounds;
+      }
 
-
-      Value* addr = ptrOp;
       IRBuilder<> IRB(load->getNextNode());
-      auto baseCasted = IRB.CreateBitCast(addr, int8PtrTy);
       Value* bounds = nullptr;
+      Value* addr = ptrOp;
+      if (ptrOp->getType()->getPointerAddressSpace() != 0) {
+        // FIXME: Is this the correct way to handle pointers to a non-default address space?
+        //   Should such pointers even be allowed as the basis for sensitive variables?
+	logInfBnd(basedOnValue, insertionPoint);
+        return infiniteBounds;
+      }
+      auto baseCasted = IRB.CreateBitCast(addr, int8PtrTy);
       if (DebugMode) {
         auto id = ConstantInt::get(int64Ty, IDCounter++);
         bounds = IRB.CreateCall(getBoundsDebug, {baseCasted, DebugString, id}, boundsName);
@@ -2466,19 +3611,31 @@ class BoundsAnalysis {
       IRBuilder<> IRB(&*insertionPoint->getParent()->getParent()->getEntryBlock().getFirstInsertionPt());
       auto num = ConstantInt::get(int64Ty, argu->getArgNo()+1);
       Value* bounds = nullptr;
-      if (DebugMode) {
-        auto id = ConstantInt::get(int64Ty, IDCounter++);
-        bounds = IRB.CreateCall(getFnArgBoundsDebug, {num, DebugString, id}, boundsName);
+      if (argu->getType()->isPointerTy() && argu->getType()->getPointerElementType()->isFunctionTy()) {
+        // Function pointers have no associated bounds.
+	logInfBnd(basedOnValue, insertionPoint);
+        bounds = infiniteBounds;
+      } else if (argu->getParent()->hasName() && argu->getParent()->getName().endswith(UNINSTRUMENTED_SUFFIX)) {
+        // This treats all arguments passed to uninstrumented functions as though they are sensitive,
+        // but with infinite bounds to handle some cases in which the arguments are not actually sensitive.
+	logInfBnd(basedOnValue, insertionPoint);
+        bounds = infiniteBounds;
       } else {
-        bounds = IRB.CreateCall(getFnArgBounds, {num}, boundsName);
+        if (DebugMode) {
+          auto id = ConstantInt::get(int64Ty, IDCounter++);
+          bounds = IRB.CreateCall(getFnArgBoundsDebug, {num, DebugString, id}, boundsName);
+        } else {
+          bounds = IRB.CreateCall(getFnArgBounds, {num}, boundsName);
+        }
+        NumBoundsLoads++;
       }
-      NumBoundsLoads++;
       boundsMap[argu] = bounds;
       return bounds;
     } else if (auto alloc = dyn_cast<AllocaInst>(basedOnValue)) {
       assert(boundsMap[alloc] && "all alloca should be in bounds map");
       return boundsMap[alloc];
     } else if (isa<Function>(basedOnValue)) {
+      logInfBnd(basedOnValue, insertionPoint);
       return infiniteBounds; // we don't do cfi
     }
     basedOnValue->dump();
@@ -2663,6 +3820,9 @@ class BoundsAnalysis {
   }
   void insertBoundsStore(Value* bounds, Value* ptrAddr, Value* dbgStr, IRBuilder<>& IRB) {
     // store the bounds
+    if (bounds == infiniteBounds) {
+      logInfBnd(ptrAddr, IRB);
+    }
     auto ptrCasted = IRB.CreateBitCast(ptrAddr, int8PtrTy);
     if (DebugMode) {
       auto id = ConstantInt::get(int64Ty, IDCounter++);
@@ -2689,9 +3849,14 @@ class BoundsAnalysis {
 
     for (inst_iterator It = inst_begin(&F), Ie = inst_end(&F); It != Ie; ++It) {
       auto i = &*It;
-      if (auto store = dyn_cast<StoreInst>(i)) {
+      if (allocaAccesses.count(i))
+        continue;
+      if (StoreInst *store = dyn_cast<StoreInst>(i)) {
         if (sensitiveSet.count(store->getPointerOperand()) || sensitiveSet.count(store->getValueOperand())) {
           auto val = store->getValueOperand();
+
+          if (sensitiveSet.isUnsafeStackPtr(store->getPointerOperand()))
+            continue;
 
           Value* bounds = nullptr;
           Value* dbgStr = nullptr;
@@ -2770,18 +3935,24 @@ class BoundsAnalysis {
           insertBoundsStore(bounds, ptrAddr, dbgStr, IRB);
         }
       }
-      if (auto call = dyn_cast<CallInst>(i)) {
+      if (CallInst *call = dyn_cast<CallInst>(i)) {
         // dont bother storing bounds when we call instrinc functions
         // __ds_ functions should probably check the bounds
-        auto calledFn = call->getCalledFunction();
-        if (calledFn && isWhiteListed(*calledFn)) { continue; }
+        Function *calledFn = call->getCalledFunction();
+        if (calledFn && !isCallToNamedFn(call, "__ds_safe_realloc") 
+            && isWhiteListed(*calledFn)) { continue; }
 
-        if (calledFn && calledFn->isDeclaration()) { continue; }
+        if (calledFn && !isCallToNamedFn(call, "__ds_safe_realloc") 
+            && calledFn->isDeclaration()) { continue; }
 
-
+        unsigned fixedArgCnt = call->getNumArgOperands();
+        if (calledFn && !calledFn->isDeclaration())
+          fixedArgCnt = calledFn->getFunctionType()->getFunctionNumParams();
+        bool hitVarArg = false;
         //DCDBG("checking call: ");
         //DEBUG(call->dump());
-        int i = 1;
+        unsigned i = 1;
+        IRBuilder<> CallIRB(call);
         for (auto& argu : call->arg_operands()) {
           if (!argu->getType()->isPointerTy()) {
             // no bounds for non-pointer types
@@ -2789,42 +3960,91 @@ class BoundsAnalysis {
             i++; // this is a dumb wahy of doing it because i forgot to inc before this continue and that caused a bug :'(
             continue;
           }
-          if (sensitiveSet.count(argu) || isNullPointerPassedAsSensitive(*call, argu, i-1)) {
-            IRBuilder<> IRB(call);
+          if (sensitiveSet.count(argu) ||
+              isNullPointerPassedAsSensitive(*call, argu, i-1, sensitiveSet) ||
+              isCallToNamedFn(call, "__ds_safe_realloc") ||
+              fixedArgCnt < i) {
             Value* dbgStr = nullptr;
             if (DebugMode) {
-              dbgStr = getDebugString(IRB, call);
+              dbgStr = getDebugString(CallIRB, call);
             }
             auto bounds = getOrLoadBounds(argu, boundsMap, TLI, dbgStr, call);
-            storeFnArg(IRB, bounds, i, dbgStr);
+            if (fixedArgCnt < i) {
+              if (!hitVarArg) {
+                hitVarArg = true;
+                CallIRB.CreateCall(pushFnVarargBounds, {invalidBounds});
+              }
+              // This is a variadic argument and the call is to an internal (hence, instrumented) function.
+              CallIRB.SetInsertPoint(CallIRB.CreateCall(pushFnVarargBounds, {bounds}));
+            } else {
+              if (bounds == infiniteBounds) {
+                logInfBnd(argu, CallIRB);
+              }
+
+              storeFnArg(CallIRB, bounds, i, dbgStr);
+            }
           }
           i++;
         }
+        if (hitVarArg) {
+          CallIRB.SetInsertPoint(call->getNextNode());
+          CallIRB.CreateCall(popFnRemainingVarargBounds);
+        }
       }
       if (auto ret = dyn_cast<ReturnInst>(i)) {
-        if (auto rv = ret->getReturnValue()) {
-          if (sensitiveSet.count(rv) && couldHaveBounds(rv)) {
-            IRBuilder<> IRB(ret);
-            Value* dbgStr = nullptr;
-            if (DebugMode) {
-              dbgStr = getDebugString(IRB, ret);
+        if (sensitiveSet.count(&F)) {
+          IRBuilder<> IRB(ret);
+          Value* dbgStr = nullptr;
+          if (DebugMode) {
+            dbgStr = getDebugString(IRB, ret);
+          }
+          if (auto rv = ret->getReturnValue()) {
+            if (couldHaveBounds(rv)) {
+              assert(sensitiveSet.count(rv));
+              Value *bounds = getOrLoadBounds(rv, boundsMap, TLI, dbgStr, ret);
+              if (bounds == infiniteBounds) {
+                logInfBnd(rv, IRB);
+              }
+              storeFnArg(IRB, bounds, 0, dbgStr);
             }
-            auto bounds = getOrLoadBounds(rv, boundsMap, TLI, dbgStr, ret);
-            storeFnArg(IRB, bounds, 0, dbgStr);
           }
         }
       }
+      if (LoadInst *load = dyn_cast<LoadInst>(i)) {
+        // The purpose of this is not actually to store bounds but rather
+        // to ensure that bounds for variadic arguments are always popped
+        // regardless of whether the memory pointed to by that argument is
+        // actually accessed by the program.  Otherwise, fewer variadic
+        // arguments may end up being popped than are pushed.
+        if (!load->getType()->isPointerTy()) {
+          bool castToPtr = false;
+          for (auto loadUser : load->users()) {
+            if (isa<IntToPtrInst>(loadUser)) {
+              castToPtr = true;
+              break;
+            }
+          }
+
+          if (!castToPtr)
+            continue;
+        }
+
+        Value* nonCastedPtrOp = load->getPointerOperand();
+        while (BitCastInst *cast = dyn_cast<BitCastInst>(nonCastedPtrOp)) {
+          nonCastedPtrOp = cast->getOperand(0);
+        }
+        // See X86_64ABIInfo::EmitVAArg in clang/lib/CodeGen/TargetInfo.cpp for how variadic args are handled.
+        if (nonCastedPtrOp->hasName() && nonCastedPtrOp->getName().startswith("vaarg.addr")) {
+          IRBuilder<> IRB(load->getNextNode());
+          Value* bounds = nullptr;
+          // This value was retrieved by va_arg, so dequeue its bounds appropriately.
+          bounds = IRB.CreateCall(popFnVarargBounds, {});
+
+          NumBoundsLoads++;
+          boundsMap[load] = bounds;
+        }
+      }
     }
-  }
-  bool isNullPointerPassedAsSensitive(CallInst& call, Value* argu, unsigned argNo) {
-    if (!isa<ConstantPointerNull>(argu)) { return false; }
-    auto calledF = call.getCalledFunction();
-    if (!calledF) { return false; }
-    auto arg = calledF->arg_begin();
-    for (unsigned i = 0; i != argNo; ++i) {
-      ++arg;
-    }
-    return sensitiveSet.count(&*arg);
   }
 
   Value* getBasedOnValue(Value* target) {
@@ -3026,9 +4246,13 @@ class BoundsAnalysis {
             sensitiveAllocations.insert(call);
           }
       }
+#if 0
+      // All stack allocations that remain at this stage are on the safe stack,
+      // so they do not require bounds checking.
       if (isa<AllocaInst>(i) && sensitiveSet.count(i)) {
         sensitiveAllocations.insert(i);
       }
+#endif
     }
   }
   void createBoundsForAllocations(const DataLayout& DL,
@@ -3049,6 +4273,12 @@ class BoundsAnalysis {
           sz = mallc->getArgOperand(0);
         } else if (fnName.endswith("alloc")) {
           sz = mallc->getArgOperand(0);
+	} else if (fnName == SAFE_GMTIME_NAME) {
+	  auto tmTy = M.getTypeByName("struct.tm");
+	  assert(tmTy && "Should be able to lookup struct.tm type in a module that uses gmtime.");
+	  uint64_t tmSzBits = DL.getTypeSizeInBits(tmTy);
+	  assert(tmSzBits % 8 == 0 && "Expected struct.tm type to fit precisely in some number of bytes.");
+	  sz = ConstantInt::get(int64Ty, sizeof(tm));
         } else if (fnName.endswith("_Znam")
                                    || fnName.endswith("_Znaj")
                                    || fnName.endswith("_Znwm")
@@ -3073,38 +4303,33 @@ class BoundsAnalysis {
         );
       }
       if (auto alloca = dyn_cast<AllocaInst>(alloc)) {
-        if (alloca->isStaticAlloca()) {
-          auto nelements = alloca->getArraySize();
-          auto typeSize = DL.getTypeAllocSize(alloca->getAllocatedType());
-          auto typeSizeVal = ConstantInt::get(int32Ty, typeSize);
-          Value* sz = IRB.CreateMul(nelements, typeSizeVal);
-          auto bounds = createBounds(IRB, alloca, sz);
-          boundsMap[alloca] = bounds;
-          DCDBG("created bounds: ");
-          DEBUG(alloca->dump());
-          DEBUG(dbgs() << " => ");
-          DEBUG(
-                Value* lower = IRB.CreateExtractValue(bounds, 0);
-              lower->dump();
-          );
-          DEBUG(dbgs() << " => ");
-          DEBUG(
-                Value* upper = IRB.CreateExtractValue(bounds, 1);
-              upper->dump();
-          );
-        } else {
-          auto sz = alloca->getArraySize();
-          auto bounds = createBounds(IRB, alloca, sz);
-          boundsMap[alloca] = bounds;
-        }
+        auto nelements = alloca->getArraySize();
+        auto typeSize = DL.getTypeAllocSize(alloca->getAllocatedType());
+        auto typeSizeVal = ConstantInt::get(int32Ty, typeSize);
+        Value* sz = IRB.CreateMul(nelements, typeSizeVal);
+        auto bounds = createBounds(IRB, alloca, sz);
+        boundsMap[alloca] = bounds;
+        DCDBG("created bounds: ");
+        DEBUG(alloca->dump());
+        DEBUG(dbgs() << " => ");
+        DEBUG(
+              Value* lower = IRB.CreateExtractValue(bounds, 0);
+            lower->dump();
+        );
+        DEBUG(dbgs() << " => ");
+        DEBUG(
+              Value* upper = IRB.CreateExtractValue(bounds, 1);
+            upper->dump();
+        );
       }
     }
   }
   Bounds* createBounds(IRBuilder<>& IRB, Value* Base, Value*Size) {
     auto last_idx = IRB.CreateSub(Size, ConstantInt::get(Size->getType(), 1));
-    auto last = IRB.CreateGEP(Base, last_idx, "object_end");
+    auto baseInt = IRB.CreatePtrToInt(Base, int64Ty, "object_base_int");
+    auto lastInt = IRB.CreateAdd(baseInt, last_idx, "object_last_int");
+    auto lastCasted = IRB.CreateIntToPtr(lastInt, int8PtrTy, "object_last");
     auto baseCasted = IRB.CreateBitCast(Base, int8PtrTy);
-    auto lastCasted = IRB.CreateBitCast(last, int8PtrTy);
     Bounds* bounds = UndefValue::get(boundsTy);
     bounds = IRB.CreateInsertValue(bounds, baseCasted, 0);
     bounds = IRB.CreateInsertValue(bounds, lastCasted, 1);
@@ -3112,7 +4337,7 @@ class BoundsAnalysis {
   }
 
   void insertInLineBoundsCheck(Function& F, Instruction* checkedInst,
-                                         Bounds* bounds, Value* ptr, Value* debugStr, const DataLayout& DL) {
+                                         Bounds* bounds, Value* ptr, Value* debugStr, const DataLayout& DL, Value *szIdx) {
 
     if (bounds == infiniteBounds) {
       return;
@@ -3133,16 +4358,6 @@ class BoundsAnalysis {
     auto uncond = --origEnd;
     IRBuilder<> origBuilder(&*uncond);
 
-    auto ptrType = cast<PointerType>(ptr->getType());
-    auto eleType = ptrType->getElementType();
-    uint64_t sz = 0;
-    if (isa<FunctionType>(eleType)) {
-      sz = 1;
-    } else {
-      sz = DL.getTypeStoreSize(eleType);
-    }
-    auto idx = cast<ConstantInt>(ConstantInt::get(int64Ty, sz-1));
-
     if (DebugMode) {
       auto numBoundsChecksPtr = getOrCreateNumBoundsChecks(*F.getParent());
       assert(numBoundsChecksPtr && "__ds_num_bounds_checks should exist");
@@ -3152,7 +4367,7 @@ class BoundsAnalysis {
     }
 
     auto ptrCasted = origBuilder.CreateBitCast(ptr, int8PtrTy);
-    auto objectBottom = origBuilder.CreateGEP(ptrCasted, idx, ptr->getName() + "_bottom");
+    auto objectBottom = origBuilder.CreateGEP(ptrCasted, szIdx, ptr->getName() + "_bottom");
 
     auto base = origBuilder.CreateExtractValue(bounds, 0);
     auto last = origBuilder.CreateExtractValue(bounds, 1);
@@ -3189,6 +4404,26 @@ class BoundsAnalysis {
 
     return;
   }
+  void insertInLineBoundsCheck(Function& F, Instruction* checkedInst,
+                                         Bounds* bounds, Value* ptr, Value* debugStr, const DataLayout& DL) {
+    if (bounds == infiniteBounds) {
+      return;
+    }
+
+    auto ptrType = cast<PointerType>(ptr->getType());
+    auto eleType = ptrType->getElementType();
+
+    uint64_t sz = 0;
+    if (isa<FunctionType>(eleType)) {
+      sz = 1;
+    } else {
+      sz = DL.getTypeStoreSize(eleType);
+    }
+
+    auto idx = cast<ConstantInt>(ConstantInt::get(int64Ty, sz-1));
+
+    insertInLineBoundsCheck(F, checkedInst, bounds, ptr, debugStr, DL, idx);
+  }
   void insertBoundsChecks(Function& F, BoundsMap& boundsMap, const DataLayout& DL, const TargetLibraryInfo& TLI) {
     // we need to check bounds whenever we dereference a pointer ...
     // which is when we:
@@ -3199,9 +4434,12 @@ class BoundsAnalysis {
 
     // TODO I need to build up all the places that need bounds and then insert the checks
     // because the inline check moves the instruction
-    vector<Value*> needsBounds;
+    vector<Instruction*> needsBounds;
     for (inst_iterator It = inst_begin(&F), Ie = inst_end(&F); It != Ie; ++It) {
       auto inst = &*It;
+      if (allocaAccesses.count(inst))
+        // SafeStack has already determined that this access is safe, so it does not need to be instrumented here.
+        continue;
       if (auto load = dyn_cast<LoadInst>(inst)) {
         if (sensitiveSet.count(load->getPointerOperand())) {
           DCDBG("bounds checking: ");
@@ -3216,14 +4454,23 @@ class BoundsAnalysis {
           needsBounds.push_back(inst);
         }
       }
-      if (auto call = dyn_cast<CallInst>(inst)) {
-        if (!call->getCalledFunction()) {
-          // we don't do cfi
+      if (CallInst *call = dyn_cast<CallInst>(inst))
+        if (auto calledF = call->getCalledFunction()) {
+          if (calledF->hasName() && calledF->getName().startswith("llvm.memcpy")) {
+            auto dest = call->getArgOperand(0);
+            if (sensitiveSet.count(dest))
+              needsBounds.push_back(inst);
+          }
         }
-      }
     }
 
     for (auto& inst : needsBounds) {
+      BasicBlock *BB = inst->getParent();
+      if (BB->hasName() && BB->getName().startswith("vaarg."))
+        // Do not instrument the compiler-generated memory accesses
+        // that implement variadic argument retrieval.  This assumes
+        // that such accesses are safe.
+        continue;
       if (auto store = dyn_cast<StoreInst>(inst)) {
         IRBuilder<> IRB(store);
         auto ptrOp = store->getPointerOperand();
@@ -3257,18 +4504,24 @@ class BoundsAnalysis {
         insertInLineBoundsCheck(F, load, bounds, ptrOp, debugStr, DL);
         NumBoundsChecks++;
       } else if (auto call = dyn_cast<CallInst>(inst)) {
+        auto dest = call->getArgOperand(0);
+        auto src = call->getArgOperand(1);
+        auto sz = call->getArgOperand(2);
 
-        if (call->getCalledFunction() || call->isInlineAsm())  {
-          continue;
-        }
-        if (isa<GlobalAlias>(call->getCalledValue())) {
-          continue; // musl has these weird aliases but they're not really pointer
-        }
         IRBuilder<> IRB(call);
-        auto debugStr = getDebugString(IRB, call);
-        auto fnPtr = call->getCalledValue();
-        auto bounds = getOrLoadBounds(fnPtr, boundsMap, TLI, debugStr, call);
-        insertInLineBoundsCheck(F, call, bounds, fnPtr, debugStr, DL);
+        auto szMinus1 = IRB.CreateSub(sz, ConstantInt::get(int64Ty, 1));
+        Value* debugStr = nullptr;
+        if (DebugMode) {
+          debugStr = getDebugString(IRB, call);
+        }
+        auto boundsDest = getOrLoadBounds(dest, boundsMap, TLI, debugStr, call);
+        insertInLineBoundsCheck(F, call, boundsDest, dest, debugStr, DL, szMinus1);
+        NumBoundsChecks++;
+        if (DebugMode) {
+          debugStr = getDebugString(IRB, call);
+        }
+        auto bounds = getOrLoadBounds(src, boundsMap, TLI, debugStr, call);
+        insertInLineBoundsCheck(F, call, bounds, src, debugStr, DL, szMinus1);
         NumBoundsChecks++;
       }
     }
@@ -3279,15 +4532,22 @@ class BoundsAnalysis {
     return false;
   }
   public:
-  BoundsAnalysis(Module& M, const TargetLibraryInfo& TLI, const ValueSet& sensitiveSet) : M(M), sensitiveSet(sensitiveSet) {
+  BoundsAnalysis(Module& M, const TargetLibraryInfo& TLI, const ValueSet& sensitiveSet, const std::set<const Instruction *>& allocaAccesses_) : M(M), ObjSizeEval(M.getDataLayout(), &TLI, M.getContext(), /*RoundToAlign=*/true), sensitiveSet(sensitiveSet), allocaAccesses(allocaAccesses_), infBndLogFile(nullptr)
+  {
     auto Zero = ConstantExpr::getIntToPtr(ConstantInt::get(int64Ty, 0), int8PtrTy);
-    auto boundary = ConstantExpr::getIntToPtr(ConstantInt::get(int64Ty, 1ULL<<32), int8PtrTy);
     auto maxC = ConstantExpr::getIntToPtr(ConstantInt::get(int64Ty, ~0ULL), int8PtrTy);
-    infiniteBounds = ConstantStruct::get(boundsTy, boundary, maxC, NULL);
+    // Uninstrumented functions may return pointers to allocations outside of the sensitive protected region, so extend the bounds down to 0:
+    infiniteBounds = ConstantStruct::get(boundsTy, ConstantExpr::getIntToPtr(ConstantInt::get(int64Ty, 0), int8PtrTy), maxC, NULL);
+    invalidBounds = ConstantStruct::get(boundsTy, maxC, ConstantExpr::getIntToPtr(ConstantInt::get(int64Ty, 0), int8PtrTy), NULL);
     emptyBounds = ConstantStruct::get(boundsTy, Zero, Zero, NULL);
     auto DL = M.getDataLayout();
     getRuntimeFunctions();
     createGlobalBounds();
+  }
+  virtual ~BoundsAnalysis()
+  {
+    if (infBndLogFile != nullptr)
+      delete infBndLogFile;
   }
   void runOnFunction(Function& F, const DataLayout& DL, const TargetLibraryInfo& TLI) {
       InstructionSet sensAllocs;
@@ -3313,11 +4573,14 @@ struct DataShield : public ModulePass {
   explicit DataShield() : ModulePass(ID) {
     initializeDataShieldPass (*PassRegistry::getPassRegistry());
   }
+  virtual ~DataShield() {}
   bool runOnModule(Module& M) override {
 
     dbgs() << "Starting DataShield pass on: " << M.getName() << "\n";
 
-
+    assert(!(UseMask || UsePrefix) && "Mask- and prefix-based coarse-grained bounds checking not"
+	   " yet enabled to work with new section layout.");
+    
     if (SaveModuleBefore) {
         dbgs() << "[DATASHIELD] Saving module.\n";
         saveModule(M, M.getName() + "__before.ll");
@@ -3327,18 +4590,38 @@ struct DataShield : public ModulePass {
     whiteList.push_back("llvm.dbg");
     whiteList.push_back("llvm.lifetime");
     whiteList.push_back("__ds");
+    whiteList.push_back("_start_c");
+    whiteList.push_back("_start");
+    whiteList.push_back("__init_libc");
+    whiteList.push_back("__libc_start_main");
+    whiteList.push_back("static_init_tls");
+    whiteList.push_back("__copy_tls");
+    whiteList.push_back("__init_unsafe_stack");
+    whiteList.push_back("__init_tp");
+    whiteList.push_back("pthread_getattr_np");
+    whiteList.push_back("init_mparams");
+    whiteList.push_back("create_mspace_with_base");
+    whiteList.push_back("init_user_mstate");
+    whiteList.push_back("init_top");
+    whiteList.push_back("mspace_");
+    whiteList.push_back("vfprintf");
+    whiteList.push_back("fprintf");
+    whiteList.push_back("printf");
+    whiteList.push_back("fmt_x");
+    whiteList.push_back("__stdio_exit");
+    whiteList.push_back("__mremap");
 
     initTypeShortHands(M);
     getRuntimeMemManFunctions(M);
 
     TargetLibraryInfoImpl TLII(Triple(M.getTargetTriple()));
     TargetLibraryInfo TLI(TLII);
-    auto DL = M.getDataLayout();
+    auto& DL = M.getDataLayout();
 
     // conservatively replace every free/malloc/calloc/realloc/strdup with the unsafe verision
 
     dbgs() << "[DATASHIELD] Replacing all memman functions with unsafe ...\n";
-    if (LibraryMode) {
+    if (LibraryMode || SandboxedProgMode) {
       replaceAllByNameWith(M, "malloc", *unsafeMalloc);
       replaceAllByNameWith(M, "free", *unsafeFree);
       replaceAllByNameWith(M, "calloc", *unsafeCalloc);
@@ -3346,7 +4629,7 @@ struct DataShield : public ModulePass {
       replaceAllByNameWith(M, "strdup", *unsafeStrdup);
       replaceAllByNameWith(M, "__strdup", *unsafeStrdup);
       replaceAllByNameWith(M, "xmalloc", *unsafeMalloc);
-      return true;
+      if (LibraryMode) return true;
     } else {
       // NormalMode
       replaceAllByNameWith(M, "malloc", *unsafeMalloc);
@@ -3376,48 +4659,65 @@ struct DataShield : public ModulePass {
 
     Sandboxer boxer(M);
 
-    dbgs() << "[DATASHIELD] Starting sensitivity analysis.\n";
     SensitivityAnalysis SA(M);
-    if (SA.sensitiveTypes.size() != 0) {
-      SA.analyzeModule();
+    if (!SandboxedProgMode) {
+      dbgs() << "[DATASHIELD] Starting sensitivity analysis.\n";
+      if (SA.sensitiveTypes.size() != 0) {
+        SA.analyzeModule();
 
-      // type check?
+        // type check?
 
-      // for every callinfo in SA that uses sensitive data,
-      // redirect the callee to the replacement function
-      for (auto& ci : SA.callInfos.data) {
-        if (ci.needsNewFunction()) {
-          if (!ci.isDirectCall()) {
-            continue;
-          }
-          if (ci.replacement == nullptr && !ci.isCallToExternalFunction()) {
-            ci.dump();
-            dbgs() << ci.getSignatureString() << "\n";
-            llvm_unreachable("we should be replacing all non external functions that need new functions...");
-          }
-          if (ci.replacement != nullptr) {
-            auto& cs = ci.callSite;
-            auto repl = ci.replacement;
-            auto orig = ci.getCallee();
-            //DEBUG(dbgs() << "in :");
-            //DEBUG(cs.dump());
-            //DEBUG(dbgs() << "replacing: " << orig->getName() << " with " << repl->getName() << "\n");
-            cs.replaceUsesOfWith(orig, repl);
+        // for every callinfo in SA that uses sensitive data,
+        // redirect the callee to the replacement function
+        for (auto& ci : SA.callInfos.data) {
+          if (ci.needsNewFunction()) {
+            if (!ci.isDirectCall()) {
+              continue;
+            }
+            if (ci.replacement == nullptr && !ci.isCallToExternalFunction() && !isWhiteListed(*ci.getCallee())) {
+              ci.dump();
+              dbgs() << ci.getSignatureString(SA.sensitiveSet) << "\n";
+              llvm_unreachable("we should be replacing all non external functions that need new functions...");
+            }
+            if (ci.replacement != nullptr) {
+              auto& cs = ci.callSite;
+              auto repl = ci.replacement;
+              auto orig = ci.getCallee();
+              //DEBUG(dbgs() << "in :");
+              //DEBUG(cs.dump());
+              //DEBUG(dbgs() << "replacing: " << orig->getName() << " with " << repl->getName() << "\n");
+              cs.replaceUsesOfWith(orig, repl);
+            }
           }
         }
       }
+
+      //SA.sensitiveSet.dump();
+      dbgs() << "[DATASHIELD] Finished sensitivity analysis.\n";
     }
 
-    boxer.copyAndReplaceEnviron(M, SA.sensitiveSet);
-
-
-    //SA.sensitiveSet.dump();
-    dbgs() << "[DATASHIELD] Finished sensitivity analysis.\n";
+      boxer.copyAndReplaceEnviron(M, SA.sensitiveSet);
 
     for (auto& F : M) {
       if (!isWhiteListed(F)) {
-        boxer.insertPointerMasks(F, SA.sensitiveSet);
+        boxer.insertPointerMasks(F, SA.sensitiveSet, SA.allocaAccesses, &DL, TLI);
       }
+    }
+    
+    if (SandboxedProgMode) {
+      dbgs() << "start memory regioner\n";
+      MemoryRegioner regioner(M, SA.sensitiveSet);
+      for (auto& F: M)
+        regioner.replaceCFuncsThatAlloc(F);
+      dbgs() << "end memory regioner\n";
+
+      boxer.copyAndReplaceArgvIfNecessary(M, SA.sensitiveSet);
+      if (SaveModuleAfter) {
+        dbgs() << "saving module\n";
+        saveModule(M, M.getName() + "__after.ll");
+        dbgs() << "done saving module\n";
+      }
+      return true;
     }
 
     dbgs() << "start memory regioner\n";
@@ -3430,12 +4730,13 @@ struct DataShield : public ModulePass {
     for (auto& F : M) {
       regioner.moveSensitiveAllocsToHeap(F, DL);
       regioner.replaceAllocationsWithSafe(M, F); // the unsafe allocation functions are already replaced
+      regioner.moveSensitiveUnsafeStackAllocsToHeap(F, DL);
       regioner.replaceByValSensitiveArguments(M, F, DL);
     }
     dbgs() << "end memory regioner\n";
 
     dbgs() << "start bounds analysis\n";
-    BoundsAnalysis BA(M, TLI, SA.sensitiveSet);
+    BoundsAnalysis BA(M, TLI, SA.sensitiveSet, SA.allocaAccesses);
     for (auto& F : M) {
       if (!isWhiteListed(F)) {
         BA.runOnFunction(F, DL, TLI);
@@ -3633,7 +4934,7 @@ struct DataShield : public ModulePass {
     }
 
 
-    if (DebugMode) {
+    if (DebugMode && !NormalModeNoMain) {
         insertStatsDump(M);
     }
 
@@ -3648,11 +4949,12 @@ struct DataShield : public ModulePass {
     return true;
   }
 }; // end struct DataShield
+
 } // end anonymous namespace
 
 char DataShield::ID = 0;
 INITIALIZE_PASS_BEGIN(DataShield, "datashield", "DataShield", false, false)
-INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+//INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_END(DataShield, "datashield", "DataShield", false, false)
 
 ModulePass *llvm::createDataShieldPass() {

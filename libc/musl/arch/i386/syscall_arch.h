@@ -52,8 +52,17 @@ static inline long __syscall6(long n, long a1, long a2, long a3, long a4, long a
 	return __ret;
 }
 
+#if !SEP_STACK_SEG
+/* The vDSO may not be compiled with support for a separate stack segment.
+ * Avoid invoking the vDSO when this feature is enabled, since it may try to
+ * access the stack using memory operands with base registers other than EBP or
+ * ESP without also using a stack segment override prefix.  A special compiler
+ * pass needs to be used to add such prefixes, and it is unlikely that a pass
+ * of that sort was applied when the vDSO was compiled.
+ */
 #define VDSO_USEFUL
 #define VDSO_CGT_SYM "__vdso_clock_gettime"
 #define VDSO_CGT_VER "LINUX_2.6"
+#endif
 
 #define SYSCALL_USE_SOCKETCALL

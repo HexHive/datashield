@@ -374,6 +374,7 @@ public:
 
   unsigned NumLocals = 0;
   StringTableSection<ELFT> &StrTabSec;
+  uint32_t getGlobalSymIndex(SymbolBody *Body);
 
 private:
   void writeLocalSymbols(uint8_t *&Buf);
@@ -712,6 +713,7 @@ template <class ELFT> struct In {
   static VersionDefinitionSection<ELFT> *VerDef;
   static VersionTableSection<ELFT> *VerSym;
   static VersionNeedSection<ELFT> *VerNeed;
+  static RelocationSection<ELFT> *Yolk;
 };
 
 template <class ELFT> InputSection<ELFT> *In<ELFT>::ARMAttributes;
@@ -741,6 +743,7 @@ template <class ELFT> SymbolTableSection<ELFT> *In<ELFT>::SymTab;
 template <class ELFT> VersionDefinitionSection<ELFT> *In<ELFT>::VerDef;
 template <class ELFT> VersionTableSection<ELFT> *In<ELFT>::VerSym;
 template <class ELFT> VersionNeedSection<ELFT> *In<ELFT>::VerNeed;
+template <class ELFT> RelocationSection<ELFT> *In<ELFT>::Yolk;
 } // namespace elf
 } // namespace lld
 

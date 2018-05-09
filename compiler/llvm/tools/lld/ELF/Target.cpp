@@ -385,6 +385,8 @@ RelExpr X86TargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
     return R_NEG_TLS;
   case R_386_NONE:
     return R_HINT;
+  case R_386_32_YOLK:
+    return R_YOLK;
   default:
     error("do not know how to handle relocation '" + toString(Type) + "' (" +
           Twine(Type) + ")");
@@ -661,6 +663,9 @@ RelExpr X86_64TargetInfo<ELFT>::getRelExpr(uint32_t Type,
     return R_GOT_PC;
   case R_X86_64_NONE:
     return R_HINT;
+  case R_X86_64_64_YOLK:
+  case R_X86_64_32_YOLK:
+    return R_YOLK;
   default:
     error("do not know how to handle relocation '" + toString(Type) + "' (" +
           Twine(Type) + ")");

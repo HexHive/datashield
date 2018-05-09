@@ -47,12 +47,16 @@ CFLAGS_C99FSE = -std=c99 -ffreestanding -nostdinc
 
 CFLAGS_ALL = $(CFLAGS_C99FSE)
 CFLAGS_ALL += -D_XOPEN_SOURCE=700 -I$(srcdir)/arch/$(ARCH) -I$(srcdir)/arch/generic -Iobj/src/internal -I$(srcdir)/src/internal -Iobj/include -I$(srcdir)/include
-CFLAGS_ALL += $(CPPFLAGS) $(CFLAGS_AUTO) $(CFLAGS)
+CFLAGS_ALL += $(CPPFLAGS) $(CFLAGS_AUTO)
+# These flags are selectively re-added for certain files below.
+CFLAGS_ALL += $(filter-out -fsanitize=safe-stack -mseparate-stack-seg,$(CFLAGS))
 
 LDFLAGS_ALL = $(LDFLAGS_AUTO) $(LDFLAGS)
 
-AR      = $(CROSS_COMPILE)ar
-RANLIB  = $(CROSS_COMPILE)ranlib
+#AR      = $(CROSS_COMPILE)ar
+AR	= $(HOME)/research/datashield/ds_sysroot_debug/bin/llvm-ar
+#RANLIB  = $(CROSS_COMPILE)ranlib
+RANLIB	= $(HOME)/research/datashield/ds_sysroot_debug/bin/llvm-ranlib
 INSTALL = $(srcdir)/tools/install.sh
 
 ARCH_INCLUDES = $(wildcard $(srcdir)/arch/$(ARCH)/bits/*.h)
@@ -64,7 +68,7 @@ EMPTY_LIB_NAMES = m rt pthread crypt util xnet resolv dl
 EMPTY_LIBS = $(EMPTY_LIB_NAMES:%=lib/lib%.a)
 CRT_LIBS = $(addprefix lib/,$(notdir $(CRT_OBJS)))
 STATIC_LIBS = lib/libc.a
-SHARED_LIBS = lib/libc.so
+SHARED_LIBS =
 TOOL_LIBS = lib/musl-gcc.specs
 ALL_LIBS = $(CRT_LIBS) $(STATIC_LIBS) $(SHARED_LIBS) $(EMPTY_LIBS) $(TOOL_LIBS)
 ALL_TOOLS = obj/musl-gcc
@@ -131,6 +135,75 @@ NOSSP_SRCS = $(wildcard crt/*.c) \
 	src/string/memcpy.c src/string/$(ARCH)/memcpy.c \
 	ldso/dlstart.c ldso/dynlink.c
 $(NOSSP_SRCS:%.c=obj/%.o) $(NOSSP_SRCS:%.c=obj/%.lo): CFLAGS_ALL += $(CFLAGS_NOSSP)
+
+SEP_STACK_SEG_OBJS = $(filter-out $(CRT_OBJS) obj/ldso/dlstart.o,$(ALL_OBJS))
+# The safestack attribute will be selectively forced within these files below.
+SAFE_STACK_OBJS = $(filter-out \
+	$(addprefix obj/src/env/__init_tls.,o lo) \
+	$(addprefix obj/src/env/__libc_start_main.,o lo) \
+	$(addprefix obj/src/internal/safe_stack.,o lo), \
+	$(SEP_STACK_SEG_OBJS))
+
+ifeq ($(SAFE_STACK),yes)
+
+CFLAGS_ALL += -DSAFE_STACK=1
+
+define FORCE_ATTR =
+ $(eval $(addprefix obj/$(1).,o lo): CFLAGS_ALL += $(foreach func,$(2),-mllvm -force-attribute=$(func):$(FORCED_ATTR)))
+endef
+
+FORCED_ATTR = noinline
+
+# The no_sanitize attribute will only take effect if there are no inlined
+# functions that lack the attribute. That is why noinline is applied to the
+# following functions that are called from functions with the no_sanitize
+# attribute.
+$(call FORCE_ATTR,ldso/dynlink, \
+	__pthread_self a_crash decode_dyn decode_vec find_sym \
+	kernel_mapped_dso load_deps load_preload make_global makefuncdescs \
+	map_library reclaim_gaps reloc_all search_vec update_tls_size)
+$(call FORCE_ATTR,src/env/__init_tls, a_crash)
+$(call FORCE_ATTR,src/env/__libc_start_main, a_crash)
+$(call FORCE_ATTR,src/internal/safe_stack, __pthread_self a_crash)
+
+FORCED_ATTR = safestack
+
+# Since __init_tp switches to a new thread control block, it is necessary to
+# avoid accessing the unsafe stack pointer from the time that switch occurs
+# until the unsafe_stack_ptr field in the new thread control block has been
+# initialized.  That is why only the following function in __init_tls.c is
+# instrumented with SafeStack.
+$(call FORCE_ATTR,src/env/__init_tls, __copy_tls)
+$(call FORCE_ATTR,src/env/__libc_start_main, libc_start_init)
+$(call FORCE_ATTR,src/internal/safe_stack, \
+	__safestack_init_thread __safestack_pthread_exit)
+
+$(SAFE_STACK_OBJS) $(SAFE_STACK_OBJS:%.o=%.lo): CFLAGS_ALL += -fsanitize=safe-stack
+obj/src/env/getenv.o obj/src/env/getenv.lo: CFLAGS_ALL += -flto
+
+endif
+
+ifeq ($(ARCH)$(SUBARCH),i386ss)
+
+CFLAGS_ALL += -DSEP_STACK_SEG=1
+
+$(SEP_STACK_SEG_OBJS) $(SEP_STACK_SEG_OBJS:%.o=%.lo): CFLAGS_ALL += -mseparate-stack-seg
+
+# The following function is run prior to segment restrictions being activated.
+# It contains code that compiles to an instruction that may access either a
+# stack allocation or a non-stack allocation depending on a condition.
+# The X86FixupSeparateStack pass in LLVM does not support such code, since
+# simply directing the affected memory operand to either DS or SS could result
+# in an invalid memory access if DS and SS have different base addresses.
+# Specifying this attribute causes the X86FixupSeparateStack pass to not
+# process this function.  An alternative approach could have been to direct such
+# memory operands to SS if DS and SS have the same base address, which is the
+# way that musl configures the segments.  However, such compiler support has not
+# been implemented.  Regardless, adding segment override prefixes to functions
+# that only run with a flat memory model is superfluous.
+obj/ldso/dynlink.lo: CFLAGS_ALL += -mllvm -sep-stk-seg-flat-mem-func=__dls3
+
+endif
 
 $(CRT_OBJS): CFLAGS_ALL += -DCRT
 

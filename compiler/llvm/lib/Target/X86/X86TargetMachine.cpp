@@ -47,6 +47,7 @@ extern "C" void LLVMInitializeX86Target() {
   initializeWinEHStatePassPass(PR);
   initializeFixupBWInstPassPass(PR);
   initializeEvexToVexInstPassPass(PR);
+  initializeX86SafeStackBoundsCheckingCombinerPass(PR);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
@@ -162,7 +163,7 @@ X86TargetMachine::X86TargetMachine(const Target &T, const Triple &TT,
     // we need CodeModel::Large to allow our globals to be anywhere in the memory space
     // CodeModel::Default assumes all globals will be < 2^32
     : LLVMTargetMachine(T, computeDataLayout(TT), TT, CPU, FS, Options,
-                        getEffectiveRelocModel(TT, RM), CodeModel::Large/*CM*/, OL),
+                        getEffectiveRelocModel(TT, RM), /*CodeModel::Large*/CM, OL),
       TLOF(createTLOF(getTargetTriple())) {
 
   // Windows stack unwinder gets confused when execution flow "falls through"
@@ -405,4 +406,6 @@ void X86PassConfig::addPreEmitPass() {
     addPass(createX86FixupLEAs());
     addPass(createX86EvexToVexInsts());
   }
+
+  addPass(createX86SafeStackBoundsCheckingCombinerPass());
 }

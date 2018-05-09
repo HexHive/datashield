@@ -289,6 +289,9 @@ protected:
   /// Use software floating point for code generation.
   bool UseSoftFloat;
 
+  /// Restrict access to the stack
+  bool UseSeparateStackSeg;
+
   /// The minimum alignment known to hold of the stack frame on
   /// entry to the function and which must be maintained by every function.
   unsigned stackAlignment;
@@ -487,6 +490,7 @@ public:
   bool isAtom() const { return X86ProcFamily == IntelAtom; }
   bool isSLM() const { return X86ProcFamily == IntelSLM; }
   bool useSoftFloat() const { return UseSoftFloat; }
+  bool useSeparateStackSeg() const { return UseSeparateStackSeg; }
 
   /// Use mfence if we have SSE2 or we're on x86-64 (even if we asked for
   /// no-sse2). There isn't any reason to disable it if the target processor

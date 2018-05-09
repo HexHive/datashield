@@ -252,6 +252,8 @@ ModulePass *createWriteThinLTOBitcodePass(raw_ostream &Str);
 
 ModulePass *createDataShieldPass();
 
+ModulePass *createXOSecretFuncPass();
+
 } // End llvm namespace
 
 #endif
