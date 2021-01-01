@@ -9,6 +9,14 @@ Choose whatever fits your requirements.
 
 # Building the Compiler
 
+## 0. Setup and environment
+
+We built DataShield in 2016, so baseline your software around that date. You can reproduce our experiments when using
+
+* Ubuntu 16.04 LTS
+* `clang-3.9`, `ninja-build`, `cmake`, `binutils-dev` (of Ubuntu 16.04)
+* If you have more than one clang installed, either adapt the makefiles or use `update-alternatives clang` to set `clang` to `clang-3.9` and `clang++` to `clang++-3.9`
+
 ## 1. Clone this repo
 
 Clone this repo into `$HOME/research`
