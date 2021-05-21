@@ -1,38 +1,7 @@
-// RUN: %clang_cc1 -fblocks -analyze -analyzer-checker=core,nullability -verify %s
+// RUN: %clang_cc1 -fblocks -analyze -analyzer-checker=core,nullability.NullPassedToNonnull,nullability.NullReturnedFromNonnull,nullability.NullablePassedToNonnull,nullability.NullableReturnedFromNonnull,nullability.NullableDereferenced -DNOSYSTEMHEADERS=0 -verify %s
+// RUN: %clang_cc1 -fblocks -analyze -analyzer-checker=core,nullability.NullPassedToNonnull,nullability.NullReturnedFromNonnull,nullability.NullablePassedToNonnull,nullability.NullableReturnedFromNonnull,nullability.NullableDereferenced -analyzer-config nullability:NoDiagnoseCallsToSystemHeaders=true -DNOSYSTEMHEADERS=1 -verify %s
 
-#define nil 0
-#define BOOL int
-
-#define NS_ASSUME_NONNULL_BEGIN _Pragma("clang assume_nonnull begin")
-#define NS_ASSUME_NONNULL_END   _Pragma("clang assume_nonnull end")
-
-typedef struct _NSZone NSZone;
-
-@protocol NSObject
-+ (id)alloc;
-- (id)init;
-@end
-
-NS_ASSUME_NONNULL_BEGIN
-@protocol NSCopying
-- (id)copyWithZone:(nullable NSZone *)zone;
-
-@end
-
-@protocol NSMutableCopying
-- (id)mutableCopyWithZone:(nullable NSZone *)zone;
-@end
-NS_ASSUME_NONNULL_END
-
-__attribute__((objc_root_class))
-@interface
-NSObject<NSObject>
-@end
-
-@interface NSString : NSObject<NSCopying>
-- (BOOL)isEqualToString : (NSString *_Nonnull)aString;
-- (NSString *)stringByAppendingString:(NSString *_Nonnull)aString;
-@end
+#include "Inputs/system-header-simulator-for-nullability.h"
 
 @interface TestObject : NSObject
 - (int *_Nonnull)returnsNonnull;
@@ -106,7 +75,7 @@ void testBasicRules() {
   }
   Dummy a;
   Dummy *_Nonnull nonnull = &a;
-  nonnull = q; // expected-warning {{Null is assigned to a pointer which is expected to have non-null value}}
+  nonnull = q; // expected-warning {{Null assigned to a pointer which is expected to have non-null value}}
   q = &a;
   takesNullable(q);
   takesNonnull(q);
@@ -138,7 +107,7 @@ Dummy *_Nonnull testNullableReturn(Dummy *_Nullable a) {
 
 Dummy *_Nonnull testNullReturn() {
   Dummy *p = 0;
-  return p; // expected-warning {{Null is returned from a function that is expected to return a non-null value}}
+  return p; // expected-warning {{Null returned from a function that is expected to return a non-null value}}
 }
 
 void testObjCMessageResultNullability() {
@@ -205,6 +174,47 @@ void testIndirectCastNilToNonnullAndPass() {
   takesNonnull(p);  // expected-warning {{Null passed to a callee that requires a non-null 1st parameter}}
 }
 
+void testDirectCastNilToNonnullAndAssignToLocalInInitializer() {
+  Dummy * _Nonnull nonnullLocalWithAssignmentInInitializer = (Dummy * _Nonnull)0; // no-warning
+  (void)nonnullLocalWithAssignmentInInitializer;
+
+  // Since we've already had an invariant violation along this path,
+  // we shouldn't warn here.
+  nonnullLocalWithAssignmentInInitializer = 0;
+  (void)nonnullLocalWithAssignmentInInitializer;
+
+}
+
+void testDirectCastNilToNonnullAndAssignToLocal(Dummy * _Nonnull p) {
+  Dummy * _Nonnull nonnullLocalWithAssignment = p;
+  nonnullLocalWithAssignment = (Dummy * _Nonnull)0; // no-warning
+  (void)nonnullLocalWithAssignment;
+
+  // Since we've already had an invariant violation along this path,
+  // we shouldn't warn here.
+  nonnullLocalWithAssignment = 0;
+  (void)nonnullLocalWithAssignment;
+}
+
+void testDirectCastNilToNonnullAndAssignToParam(Dummy * _Nonnull p) {
+  p = (Dummy * _Nonnull)0; // no-warning
+}
+
+@interface ClassWithNonnullIvar : NSObject {
+  Dummy *_nonnullIvar;
+}
+@end
+
+@implementation ClassWithNonnullIvar
+-(void)testDirectCastNilToNonnullAndAssignToIvar {
+  _nonnullIvar = (Dummy * _Nonnull)0; // no-warning;
+
+  // Since we've already had an invariant violation along this path,
+  // we shouldn't warn here.
+  _nonnullIvar = 0;
+}
+@end
+
 void testIndirectNilPassToNonnull() {
   Dummy *p = 0;
   takesNonnull(p);  // expected-warning {{Null passed to a callee that requires a non-null 1st parameter}}
@@ -219,7 +229,7 @@ void testConditionalNilPassToNonnull(Dummy *p) {
 Dummy * _Nonnull testIndirectCastNilToNonnullAndReturn() {
   Dummy *p = (Dummy * _Nonnull)0;
   // FIXME: Ideally the cast above would suppress this warning.
-  return p; // expected-warning {{Null is returned from a function that is expected to return a non-null value}}
+  return p; // expected-warning {{Null returned from a function that is expected to return a non-null value}}
 }
 
 void testInvalidPropagation() {
@@ -267,6 +277,41 @@ Dummy *_Nonnull doNotWarnWhenPreconditionIsViolated(Dummy *_Nonnull p) {
 
 void testPreconditionViolationInInlinedFunction(Dummy *p) {
   doNotWarnWhenPreconditionIsViolated(p);
+}
+
+@interface TestInlinedPreconditionViolationClass : NSObject
+@end
+
+@implementation TestInlinedPreconditionViolationClass
+-(Dummy * _Nonnull) calleeWithParam:(Dummy * _Nonnull) p2 {
+  Dummy *x = 0;
+  if (!p2) // p2 binding becomes dead at this point.
+    return x; // no-warning
+  else
+   return p2;
+}
+
+-(Dummy *)callerWithParam:(Dummy * _Nonnull) p1 {
+  return [self calleeWithParam:p1];
+}
+
+@end
+
+int * _Nonnull InlinedPreconditionViolationInFunctionCallee(int * _Nonnull p2) {
+  int *x = 0;
+  if (!p2) // p2 binding becomes dead at this point.
+    return x; // no-warning
+  else
+   return p2;
+}
+
+int * _Nonnull InlinedReturnNullOverSuppressionCallee(int * _Nonnull p2) {
+  int *result = 0;
+  return result; // no-warning; but this is an over suppression
+}
+
+int *InlinedReturnNullOverSuppressionCaller(int * _Nonnull p1) {
+  return InlinedReturnNullOverSuppressionCallee(p1);
 }
 
 void inlinedNullable(Dummy *_Nullable p) {
@@ -417,5 +462,66 @@ Dummy *_Nonnull testDefensiveInlineChecks(Dummy * p) {
   }
 
   return newInstance;
+}
+@end
+
+NSString * _Nullable returnsNullableString();
+
+void callFunctionInSystemHeader() {
+  NSString *s = returnsNullableString();
+
+  NSSystemFunctionTakingNonnull(s);
+  #if !NOSYSTEMHEADERS
+  // expected-warning@-2{{Nullable pointer is passed to a callee that requires a non-null 1st parameter}}
+  #endif
+}
+
+void callMethodInSystemHeader() {
+  NSString *s = returnsNullableString();
+
+  NSSystemClass *sc = [[NSSystemClass alloc] init];
+  [sc takesNonnull:s];
+  #if !NOSYSTEMHEADERS
+  // expected-warning@-2{{Nullable pointer is passed to a callee that requires a non-null 1st parameter}}
+  #endif
+}
+
+// Test to make sure the analyzer doesn't warn when an a nullability invariant
+// has already been found to be violated on an instance variable.
+
+@class MyInternalClass;
+@interface MyClass : NSObject {
+  MyInternalClass * _Nonnull _internal;
+}
+@end
+
+@interface MyInternalClass : NSObject {
+  @public
+  id _someIvar;
+}
+-(id _Nonnull)methodWithInternalImplementation;
+@end
+
+@interface MyClass () {
+  MyInternalClass * _Nonnull _nilledOutInternal;
+}
+@end
+
+@implementation MyClass
+-(id _Nonnull)methodWithInternalImplementation {
+  if (!_internal)
+    return nil; // no-warning
+
+  return [_internal methodWithInternalImplementation];
+}
+
+- (id _Nonnull)methodReturningIvarInImplementation; {
+  return _internal == 0 ? nil : _internal->_someIvar; // no-warning
+}
+
+-(id _Nonnull)methodWithNilledOutInternal {
+  _nilledOutInternal = (id _Nonnull)nil;
+
+  return nil; // no-warning
 }
 @end

@@ -38,7 +38,8 @@ public:
   /// column \p FirstIndent.
   ContinuationIndenter(const FormatStyle &Style,
                        const AdditionalKeywords &Keywords,
-                       SourceManager &SourceMgr, WhitespaceManager &Whitespaces,
+                       const SourceManager &SourceMgr,
+                       WhitespaceManager &Whitespaces,
                        encoding::Encoding Encoding,
                        bool BinPackInconclusiveFunctions);
 
@@ -137,7 +138,7 @@ private:
 
   FormatStyle Style;
   const AdditionalKeywords &Keywords;
-  SourceManager &SourceMgr;
+  const SourceManager &SourceMgr;
   WhitespaceManager &Whitespaces;
   encoding::Encoding Encoding;
   bool BinPackInconclusiveFunctions;
@@ -150,10 +151,11 @@ struct ParenState {
       : Indent(Indent), IndentLevel(IndentLevel), LastSpace(LastSpace),
         NestedBlockIndent(Indent), BreakBeforeClosingBrace(false),
         AvoidBinPacking(AvoidBinPacking), BreakBeforeParameter(false),
-        NoLineBreak(NoLineBreak), LastOperatorWrapped(true),
-        ContainsLineBreak(false), ContainsUnwrappedBuilder(false),
-        AlignColons(true), ObjCSelectorNameFound(false),
-        HasMultipleNestedBlocks(false), NestedBlockInlined(false) {}
+        NoLineBreak(NoLineBreak), NoLineBreakInOperand(false),
+        LastOperatorWrapped(true), ContainsLineBreak(false),
+        ContainsUnwrappedBuilder(false), AlignColons(true),
+        ObjCSelectorNameFound(false), HasMultipleNestedBlocks(false),
+        NestedBlockInlined(false) {}
 
   /// \brief The position to which a specific parenthesis level needs to be
   /// indented.
@@ -222,6 +224,10 @@ struct ParenState {
 
   /// \brief Line breaking in this context would break a formatting rule.
   bool NoLineBreak : 1;
+
+  /// \brief Same as \c NoLineBreak, but is restricted until the end of the
+  /// operand (including the next ",").
+  bool NoLineBreakInOperand : 1;
 
   /// \brief True if the last binary operator on this level was wrapped to the
   /// next line.

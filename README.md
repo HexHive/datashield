@@ -1,5 +1,24 @@
 # Datashield
 
+Note that this is simply a research demonstration, and it should not be used in any production environment or to process sensitive data.
+
+There are known limitations in the compiler extensions that result in incomplete security coverage due to bounds not being
+generated for certain program elements.  The compiler outputs a list of such elements in a file named <module>__infiniteBoundsList
+in the same directory as the source file if it is possible to create a file in that directory.  If it is not possible to create the
+file, then compilation proceeds anyways.  Thus, the absence of such a file does not indicate that there are no program elements with
+infinite bounds.
+
+Another limitation is that sub-object bounds narrowing is not currently implemented.
+
+This version of DataShield has only been tested on C source code, not C++.
+
+Furthermore, it has only been tested with MPX-based coarse-grained bounds checks, and the revised
+section layout may be incompatible with the other coarse-grained bounds checking methods, since the
+boundary between the unsafe and safe regions was shifted down to enable placing the text section
+above that boundary.  Other coarse-grained bounds checking methods may assume that the boundary is
+at 4GiB.  It may be possible to revert back to the original boundary or to update the other
+bounds-checking methods to re-enable them.
+
 # License
 
 For LLVM see: compiler/llvm/LICENSE.txt
@@ -154,3 +173,98 @@ Must be used with `-datashield-use-mask`
 Two options for compiling system libraries:
 * `-datashield-library-mode` for compiling libraries with sandboxing only
 * `-datashield-modular` run the pass without LTO
+
+## Intel Labs experimental extensions
+
+This version of DataShield contains a number of extensions beyond the original version
+of DataShield described in the AsiaCCS 2017 paper.  Here is a partial list:
+
+* Various bug fixes
+* Support for:
+  * programs with more complex code constructs than were previously supported.
+  * secrets embedded as immediate operands.
+  * linking code above data so that it is effectively treated as execute-only due to bounds checking.
+  * protecting sensitive spilled register data.
+  * zeroing sensitive memory allocations.
+  * an injector tool to inject secrets into binaries that contain empty placeholders for secrets.
+  * eliding redundant bounds checks.
+  * redefining infinite bounds to extend down to zero rather than just down to the boundary between the unsafe and safe regions.
+  * conservatively treating function pointer invocations as having all sensitive arguments and return values.
+  * a sensitivity propagation algorithm that follows edges in the AST rather than iterating through instructions.  The logic may be easier to follow and the code is shorter, although the runtime is sometimes longer.
+
+We describe some of these extensions below:
+
+### Execute-only code
+
+The linker script was revised to place the text section above the sensitive data
+so that it effectively becomes execute-only, except with respect to constant
+pools and certain uninstrumented accesses (e.g. inline assembly, uninstrumented
+libraries, etc.).  Accesses to sensitive data are subject to fine-grained bounds
+checks, so that should prevent accesses to the text section unless infinite
+bounds were associated with the data.  Unsafe accesses are subject to coarse-
+grained bounds checks, which should also prevent access to the text section.
+However, placing code above the 4GiB boundary resulted in code addresses too
+large to fit in 32 bits, which generated linkage issues.  Thus, we lowered the
+boundary between unsafe and safe data so that the text section in our test cases
+stayed within the 4GiB boundary.
+
+### Yolk data
+
+The term "yolk data" refers to data that is attached to a specific set of program
+statements such that only those statements should have access to the data.  Yolk
+data is identified in programs using the annotation "__attribute__((annotate("yolk")))"
+The compiler enforces that by embedding the data into the text section as
+immediate operands for just the instructions that directly reference the data in
+the program.  The execute-only protections for the code help to prevent the
+yolk data from leaking.  However, we assume that some control-flow integrity
+enforcement mechanism would also be used to defend against possible attacks based on
+control-flow manipulation that could leak the yolk data.
+
+### Yolk data injector tool
+
+There are mechanisms such as Kubernetes Secrets for distributing container images
+separately from the secrets that are used within those images.  The secrets are
+distributed as files, so a mechanism is needed to weave those secrets into the
+appropriate portions of the program code prior to the program executing.
+
+The compiler and linker have been enhanced to emit information about the location of
+immediate operands that are designated to contain yolk data.  An injector tool to
+weave yolk data into a binary is in tests/hand-written/injector along with a
+sample application and yolk data file.
+
+### SafeStack integration
+
+SafeStack is an LLVM extension that moves each stack allocation to an unsafe stack if
+the compiler is unable to verify that all accesses to that allocation are safe, i.e.
+within bounds.  SafeStack can be usefully combined with DataShield to protect
+sensitive spilled register contents and to potentially reduce the overhead of
+protecting sensitive stack allocations that can be stored on the safe stack, since
+the compiler statically verifies that no bounds checks are needed for accesses to
+those allocations.
+
+This extension is based on patches that were previously submitted to the LLVM project.
+See this discussion for details: http://lists.llvm.org/pipermail/llvm-dev/2017-February/109933.html
+
+That discussion also covers the approach for eliding redundant MPX bounds checks.
+
+### Zeroing sensitive memory allocations
+
+Sensitive memory allocated by the musl-based runtime library is zeroed prior to
+being returned to the program to help prevent misuse of data that may have previously
+been stored in that memory.
+
+### Redefined infinite bounds
+
+Infinite bounds are used for some sensitive objects when computing more precise
+bounds is unsupported.  In the original version of DataShield, infinite bounds actually
+only extended down to the base of the sensitive memory region.  This version of
+DataShield extends the base to 0, with the intent of helping to enable the use of
+pointers returned by external, uninstrumented functions (in the unsafe region).
+However, it may be worthwhile to revisit this modification in the future.
+
+### Function pointer handling
+
+The DataShield pass does not currently have the ability to identify all possible function
+pointers that may be passed to a particular function pointer invocation site.  Thus, it
+conservatively assumes that all inputs to and return values from functions invoked indirectly
+are sensitive.

@@ -52,6 +52,12 @@ Here's the short story for getting up and running quickly with LLVM:
    * ``cd llvm/tools``
    * ``svn co http://llvm.org/svn/llvm-project/cfe/trunk clang``
 
+#. Checkout LLD linker **[Optional]**:
+
+   * ``cd where-you-want-llvm-to-live``
+   * ``cd llvm/tools``
+   * ``svn co http://llvm.org/svn/llvm-project/lld/trunk lld``
+
 #. Checkout Compiler-RT (required to build the sanitizers) **[Optional]**:
 
    * ``cd where-you-want-llvm-to-live``
@@ -83,9 +89,11 @@ Here's the short story for getting up and running quickly with LLVM:
    before trying to configure with cmake.  cmake does not pickup newly
    added source directories in incremental builds. 
 
-   The build uses `CMake <CMake.html>`_.
-   Although the build is known to work with CMake >= 2.8.8, we recommend CMake
-   >= v3.2, especially if you're generating Ninja build files.
+   The build uses `CMake <CMake.html>`_. LLVM requires CMake 3.4.3 to build. It
+   is generally recommended to use a recent CMake, especially if you're
+   generating Ninja build files. This is because the CMake project is constantly
+   improving the quality of the generators, and the Ninja generator gets a lot
+   of attention.
 
    * ``cd where you want to build llvm``
    * ``mkdir build``
@@ -95,10 +103,10 @@ Here's the short story for getting up and running quickly with LLVM:
      Some common generators are:
 
      * ``Unix Makefiles`` --- for generating make-compatible parallel makefiles.
-     * ``Ninja`` --- for generating `Ninja <http://martine.github.io/ninja/>`
-        build files. Most llvm developers use Ninja.
+     * ``Ninja`` --- for generating `Ninja <https://ninja-build.org>`_
+       build files. Most llvm developers use Ninja.
      * ``Visual Studio`` --- for generating Visual Studio projects and
-        solutions.
+       solutions.
      * ``Xcode`` --- for generating Xcode projects.
 
      Some Common options:
@@ -200,10 +208,9 @@ uses the package and provides other details.
 Package                                                     Version      Notes
 =========================================================== ============ ==========================================
 `GNU Make <http://savannah.gnu.org/projects/make>`_         3.79, 3.79.1 Makefile/build processor
-`GCC <http://gcc.gnu.org/>`_                                >=4.7.0      C/C++ compiler\ :sup:`1`
+`GCC <http://gcc.gnu.org/>`_                                >=4.8.0      C/C++ compiler\ :sup:`1`
 `python <http://www.python.org/>`_                          >=2.7        Automated test suite\ :sup:`2`
-`libtool <http://savannah.gnu.org/projects/libtool>`_       1.5.22       Shared library manager\ :sup:`3`
-`zlib <http://zlib.net>`_                                   >=1.2.3.4    Compression library\ :sup:`4`
+`zlib <http://zlib.net>`_                                   >=1.2.3.4    Compression library\ :sup:`3`
 =========================================================== ============ ==========================================
 
 .. note::
@@ -260,8 +267,8 @@ For the most popular host toolchains we check for specific minimum versions in
 our build systems:
 
 * Clang 3.1
-* GCC 4.7
-* Visual Studio 2013
+* GCC 4.8
+* Visual Studio 2015 (Update 3)
 
 Anything older than these toolchains *may* work, but will require forcing the
 build system with a special option and is not really a supported host platform.
@@ -273,9 +280,6 @@ recent version may be required to support all of the C++ features used in LLVM.
 
 We track certain versions of software that are *known* to fail when used as
 part of the host toolchain. These even include linkers at times.
-
-**GCC 4.6.3 on ARM**: Miscompiles ``llvm-readobj`` at ``-O3``. A test failure
-in ``test/Object/readobj-shared-object.test`` is one symptom of the problem.
 
 **GNU ld 2.16.X**. Some 2.16.X versions of the ld linker will produce very long
 warning messages complaining that some "``.gnu.linkonce.t.*``" symbol was
@@ -293,26 +297,13 @@ intermittent failures when building LLVM with position independent code.  The
 symptom is an error about cyclic dependencies.  We recommend upgrading to a
 newer version of Gold.
 
-**Clang 3.0 with libstdc++ 4.7.x**: a few Linux distributions (Ubuntu 12.10,
-Fedora 17) have both Clang 3.0 and libstdc++ 4.7 in their repositories.  Clang
-3.0 does not implement a few builtins that are used in this library.  We
-recommend using the system GCC to compile LLVM and Clang in this case.
-
-**Clang 3.0 on Mageia 2**.  There's a packaging issue: Clang can not find at
-least some (``cxxabi.h``) libstdc++ headers.
-
-**Clang in C++11 mode and libstdc++ 4.7.2**.  This version of libstdc++
-contained `a bug <http://gcc.gnu.org/bugzilla/show_bug.cgi?id=53841>`__ which
-causes Clang to refuse to compile condition_variable header file.  At the time
-of writing, this breaks LLD build.
-
 Getting a Modern Host C++ Toolchain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 This section mostly applies to Linux and older BSDs. On Mac OS X, you should
 have a sufficiently modern Xcode, or you will likely need to upgrade until you
-do. On Windows, just use Visual Studio 2013 as the host compiler, it is
-explicitly supported and widely available. FreeBSD 10.0 and newer have a modern
+do. Windows does not have a "system compiler", so you must install either Visual
+Studio 2015 or a recent version of mingw64. FreeBSD 10.0 and newer have a modern
 Clang as the system compiler.
 
 However, some Linux distributions and some other or older BSDs sometimes have
@@ -695,6 +686,73 @@ about files with uncommitted changes. The fix is to rebuild the metadata:
 
 Please, refer to the Git-SVN manual (``man git-svn``) for more information.
 
+For developers to work with a git monorepo
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note::
+
+   This set-up is using unofficial mirror hosted on GitHub, use with caution.
+
+To set up a clone of all the llvm projects using a unified repository:
+
+.. code-block:: console
+
+  % export TOP_LEVEL_DIR=`pwd`
+  % git clone https://github.com/llvm-project/llvm-project/
+  % cd llvm-project
+  % git config branch.master.rebase true
+
+You can configure various build directory from this clone, starting with a build
+of LLVM alone:
+
+.. code-block:: console
+
+  % cd $TOP_LEVEL_DIR
+  % mkdir llvm-build && cd llvm-build
+  % cmake -GNinja ../llvm-project/llvm
+
+Or lldb:
+
+.. code-block:: console
+
+  % cd $TOP_LEVEL_DIR
+  % mkdir lldb-build && cd lldb-build
+  % cmake -GNinja ../llvm-project/llvm -DLLVM_ENABLE_PROJECTS=lldb
+
+Or a combination of multiple projects:
+
+.. code-block:: console
+
+  % cd $TOP_LEVEL_DIR
+  % mkdir clang-build && cd clang-build
+  % cmake -GNinja ../llvm-project/llvm -DLLVM_ENABLE_PROJECTS="clang;libcxx;compiler-rt"
+
+A helper script is provided in `llvm/utils/git-svn/git-llvm`. After you add it
+to your path, you can push committed changes upstream with `git llvm push`.
+
+.. code-block:: console
+
+  % export PATH=$PATH:$TOP_LEVEL_DIR/llvm-project/llvm/utils/git-svn/
+  % git llvm push
+
+While this is using SVN under the hood, it does not require any interaction from
+you with git-svn.
+After a few minutes, `git pull` should get back the changes as they were
+committed. Note that a current limitation is that `git` does not directly record
+file rename, and thus it is propagated to SVN as a combination of delete-add
+instead of a file rename.
+
+If you are using `arc` to interact with Phabricator, you need to manually put it
+at the root of the checkout:
+
+.. code-block:: console
+
+  % cd $TOP_LEVEL_DIR
+  % cp llvm/.arcconfig ./
+  % mkdir -p .git/info/
+  % echo .arcconfig >> .git/info/exclude
+
+
 Local LLVM Configuration
 ------------------------
 
@@ -731,9 +789,9 @@ used by people developing LLVM.
 |                         | the configure script. The default list is defined  |
 |                         | as ``LLVM_ALL_TARGETS``, and can be set to include |
 |                         | out-of-tree targets. The default value includes:   |
-|                         | ``AArch64, AMDGPU, ARM, BPF, CppBackend, Hexagon,  |
-|                         | Mips, MSP430, NVPTX, PowerPC, Sparc, SystemZ       |
-|                         | X86, XCore``.                                      |
+|                         | ``AArch64, AMDGPU, ARM, BPF, Hexagon, Mips,        |
+|                         | MSP430, NVPTX, PowerPC, Sparc, SystemZ, X86,       |
+|                         | XCore``.                                           |
 +-------------------------+----------------------------------------------------+
 | LLVM_ENABLE_DOXYGEN     | Build doxygen-based documentation from the source  |
 |                         | code This is disabled by default because it is     |

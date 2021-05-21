@@ -18,6 +18,19 @@ struct pthread {
 	uintptr_t sysinfo;
 	uintptr_t canary, canary2;
 	pid_t tid, pid;
+#if SAFE_STACK
+	/* offset of unsafe_stack_ptr must be 0x24 for 32-bit targets
+	 * and 0x48 for 64-bit targets */
+#if LONG_MAX >> 32 == 0
+	void *unsafe_stack_ptr;
+	void *safe_stack_base;
+#else
+	void *safe_stack_base;
+	void *unsafe_stack_ptr;
+#endif
+	/* size of safe stack allocation, including the guard */
+	size_t safe_stack_size;
+#endif
 	int tsd_used, errno_val;
 	volatile int cancel, canceldisable, cancelasync;
 	int detached;

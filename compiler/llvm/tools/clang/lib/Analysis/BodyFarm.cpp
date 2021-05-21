@@ -239,7 +239,8 @@ static Stmt *create_dispatch_once(ASTContext &C, const FunctionDecl *D) {
                                            SourceLocation());
   
   // (5) Create the 'if' statement.
-  IfStmt *If = new (C) IfStmt(C, SourceLocation(), nullptr, UO, CS);
+  IfStmt *If = new (C) IfStmt(C, SourceLocation(), false, nullptr, nullptr,
+                              UO, CS);
   return If;
 }
 
@@ -342,9 +343,8 @@ static Stmt *create_OSAtomicCompareAndSwap(ASTContext &C, const FunctionDecl *D)
   Stmt *Else = M.makeReturn(RetVal);
   
   /// Construct the If.
-  Stmt *If =
-    new (C) IfStmt(C, SourceLocation(), nullptr, Comparison, Body,
-                   SourceLocation(), Else);
+  Stmt *If = new (C) IfStmt(C, SourceLocation(), false, nullptr, nullptr,
+                            Comparison, Body, SourceLocation(), Else);
 
   return If;  
 }
@@ -467,6 +467,8 @@ static Stmt *createObjCPropertyGetter(ASTContext &Ctx,
   ASTMaker M(Ctx);
 
   const VarDecl *selfVar = Prop->getGetterMethodDecl()->getSelfDecl();
+  if (!selfVar)
+    return nullptr;
 
   Expr *loadedIVar =
     M.makeObjCIvarRef(
@@ -498,6 +500,14 @@ Stmt *BodyFarm::getBody(const ObjCMethodDecl *D) {
     return nullptr;
 
   // For now, we only synthesize getters.
+  // Synthesizing setters would cause false negatives in the
+  // RetainCountChecker because the method body would bind the parameter
+  // to an instance variable, causing it to escape. This would prevent
+  // warning in the following common scenario:
+  //
+  //  id foo = [[NSObject alloc] init];
+  //  self.foo = foo; // We should warn that foo leaks here.
+  //
   if (D->param_size() != 0)
     return nullptr;
 

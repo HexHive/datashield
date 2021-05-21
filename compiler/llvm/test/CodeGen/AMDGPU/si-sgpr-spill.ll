@@ -1,5 +1,5 @@
-; RUN: llc -march=amdgcn -mcpu=SI < %s | FileCheck %s
-; RUN: llc -march=amdgcn -mcpu=tonga < %s | FileCheck %s
+; RUN: llc -march=amdgcn -mattr=+vgpr-spilling -verify-machineinstrs < %s | FileCheck %s
+; RUN: llc -march=amdgcn -mcpu=tonga -mattr=+vgpr-spilling -verify-machineinstrs < %s | FileCheck %s
 
 ; These tests check that the compiler won't crash when it needs to spill
 ; SGPRs.
@@ -22,7 +22,7 @@
 ; Writing to M0 from an SMRD instruction will hang the GPU.
 ; CHECK-NOT: s_buffer_load_dword m0
 ; CHECK: s_endpgm
-define void @main([17 x <16 x i8>] addrspace(2)* byval %arg, [32 x <16 x i8>] addrspace(2)* byval %arg1, [16 x <8 x i32>] addrspace(2)* byval %arg2, float inreg %arg3, i32 inreg %arg4, <2 x i32> %arg5, <2 x i32> %arg6, <2 x i32> %arg7, <3 x i32> %arg8, <2 x i32> %arg9, <2 x i32> %arg10, <2 x i32> %arg11, float %arg12, float %arg13, float %arg14, float %arg15, float %arg16, float %arg17, float %arg18, float %arg19, float %arg20) #0 {
+define amdgpu_ps void @main([17 x <16 x i8>] addrspace(2)* byval %arg, [32 x <16 x i8>] addrspace(2)* byval %arg1, [16 x <8 x i32>] addrspace(2)* byval %arg2, float inreg %arg3, i32 inreg %arg4, <2 x i32> %arg5, <2 x i32> %arg6, <2 x i32> %arg7, <3 x i32> %arg8, <2 x i32> %arg9, <2 x i32> %arg10, <2 x i32> %arg11, float %arg12, float %arg13, float %arg14, float %arg15, float %arg16, float %arg17, float %arg18, float %arg19, float %arg20) {
 main_body:
   %tmp = getelementptr [17 x <16 x i8>], [17 x <16 x i8>] addrspace(2)* %arg, i64 0, i32 0
   %tmp21 = load <16 x i8>, <16 x i8> addrspace(2)* %tmp, !tbaa !0
@@ -114,13 +114,15 @@ main_body:
   %tmp106 = call float @llvm.SI.fs.interp(i32 0, i32 5, i32 %arg4, <2 x i32> %arg6)
   %tmp107 = call float @llvm.SI.fs.interp(i32 1, i32 5, i32 %arg4, <2 x i32> %arg6)
   %tmp108 = call float @llvm.SI.fs.interp(i32 2, i32 5, i32 %arg4, <2 x i32> %arg6)
-  %tmp109 = call i32 @llvm.SI.tid()
+  %mbcnt.lo.0 = call i32 @llvm.amdgcn.mbcnt.lo(i32 -1, i32 0)
+  %tmp109 = call i32 @llvm.amdgcn.mbcnt.hi(i32 -1, i32 %mbcnt.lo.0)
   %tmp110 = getelementptr [64 x i32], [64 x i32] addrspace(3)* @ddxy_lds, i32 0, i32 %tmp109
   %tmp111 = bitcast float %tmp92 to i32
   store i32 %tmp111, i32 addrspace(3)* %tmp110
   %tmp112 = bitcast float %tmp93 to i32
   store i32 %tmp112, i32 addrspace(3)* %tmp110
-  %tmp113 = call i32 @llvm.SI.tid()
+  %mbcnt.lo.1 = call i32 @llvm.amdgcn.mbcnt.lo(i32 -1, i32 0)
+  %tmp113 = call i32 @llvm.amdgcn.mbcnt.hi(i32 -1, i32 %mbcnt.lo.1)
   %tmp114 = getelementptr [64 x i32], [64 x i32] addrspace(3)* @ddxy_lds, i32 0, i32 %tmp113
   %tmp115 = and i32 %tmp113, -4
   %tmp116 = getelementptr [64 x i32], [64 x i32] addrspace(3)* @ddxy_lds, i32 0, i32 %tmp115
@@ -150,7 +152,8 @@ main_body:
   %tmp138 = fmul float %tmp59, %tmp93
   %tmp139 = fmul float %tmp59, %tmp93
   %tmp140 = fmul float %tmp59, %tmp93
-  %tmp141 = call i32 @llvm.SI.tid()
+  %mbcnt.lo.2 = call i32 @llvm.amdgcn.mbcnt.lo(i32 -1, i32 0)
+  %tmp141 = call i32 @llvm.amdgcn.mbcnt.hi(i32 -1, i32 %mbcnt.lo.2)
   %tmp142 = getelementptr [64 x i32], [64 x i32] addrspace(3)* @ddxy_lds, i32 0, i32 %tmp141
   %tmp143 = bitcast float %tmp137 to i32
   store i32 %tmp143, i32 addrspace(3)* %tmp142
@@ -160,7 +163,8 @@ main_body:
   store i32 %tmp145, i32 addrspace(3)* %tmp142
   %tmp146 = bitcast float %tmp140 to i32
   store i32 %tmp146, i32 addrspace(3)* %tmp142
-  %tmp147 = call i32 @llvm.SI.tid()
+  %mbcnt.lo.3 = call i32 @llvm.amdgcn.mbcnt.lo(i32 -1, i32 0)
+  %tmp147 = call i32 @llvm.amdgcn.mbcnt.hi(i32 -1, i32 %mbcnt.lo.3)
   %tmp148 = getelementptr [64 x i32], [64 x i32] addrspace(3)* @ddxy_lds, i32 0, i32 %tmp147
   %tmp149 = and i32 %tmp147, -4
   %tmp150 = getelementptr [64 x i32], [64 x i32] addrspace(3)* @ddxy_lds, i32 0, i32 %tmp149
@@ -668,7 +672,7 @@ ENDIF66:                                          ; preds = %LOOP65
 
 ; CHECK-LABEL: {{^}}main1:
 ; CHECK: s_endpgm
-define void @main1([17 x <16 x i8>] addrspace(2)* byval %arg, [32 x <16 x i8>] addrspace(2)* byval %arg1, [16 x <8 x i32>] addrspace(2)* byval %arg2, float inreg %arg3, i32 inreg %arg4, <2 x i32> %arg5, <2 x i32> %arg6, <2 x i32> %arg7, <3 x i32> %arg8, <2 x i32> %arg9, <2 x i32> %arg10, <2 x i32> %arg11, float %arg12, float %arg13, float %arg14, float %arg15, float %arg16, float %arg17, float %arg18, float %arg19, float %arg20) #0 {
+define amdgpu_ps void @main1([17 x <16 x i8>] addrspace(2)* byval %arg, [32 x <16 x i8>] addrspace(2)* byval %arg1, [16 x <8 x i32>] addrspace(2)* byval %arg2, float inreg %arg3, i32 inreg %arg4, <2 x i32> %arg5, <2 x i32> %arg6, <2 x i32> %arg7, <3 x i32> %arg8, <2 x i32> %arg9, <2 x i32> %arg10, <2 x i32> %arg11, float %arg12, float %arg13, float %arg14, float %arg15, float %arg16, float %arg17, float %arg18, float %arg19, float %arg20) {
 main_body:
   %tmp = getelementptr [17 x <16 x i8>], [17 x <16 x i8>] addrspace(2)* %arg, i64 0, i32 0
   %tmp21 = load <16 x i8>, <16 x i8> addrspace(2)* %tmp, !tbaa !0
@@ -1580,8 +1584,8 @@ declare float @llvm.SI.load.const(<16 x i8>, i32) #2
 ; Function Attrs: nounwind readnone
 declare float @llvm.SI.fs.interp(i32, i32, i32, <2 x i32>) #2
 
-; Function Attrs: readnone
-declare i32 @llvm.SI.tid() #1
+declare i32 @llvm.amdgcn.mbcnt.lo(i32, i32) #1
+declare i32 @llvm.amdgcn.mbcnt.hi(i32, i32) #1
 
 ; Function Attrs: nounwind readonly
 declare float @ceil(float) #3
@@ -1610,10 +1614,10 @@ declare i32 @llvm.SI.packf16(float, float) #2
 
 declare void @llvm.SI.export(i32, i32, i32, i32, i32, float, float, float, float)
 
-attributes #0 = { "ShaderType"="0" }
 attributes #1 = { readnone }
 attributes #2 = { nounwind readnone }
 attributes #3 = { nounwind readonly }
 
 !0 = !{!1, !1, i64 0, i32 1}
-!1 = !{!"const", null}
+!1 = !{!"const", !2}
+!2 = !{!"tbaa root"}

@@ -904,8 +904,9 @@ define <8 x i8> @getl(<16 x i8> %x) #0 {
 
 ; CHECK-LABEL: test_extracts_inserts_varidx_extract:
 ; CHECK: str q0
-; CHECK: add x[[PTR:[0-9]+]], {{.*}}, w0, sxtw #1
-; CHECK-DAG: ld1 { v[[R:[0-9]+]].h }[0], [x[[PTR]]]
+; CHECK-DAG: and [[MASKED_IDX:x[0-9]+]], x0, #0x7
+; CHECK: bfi [[PTR:x[0-9]+]], [[MASKED_IDX]], #1, #3
+; CHECK-DAG: ld1 { v[[R:[0-9]+]].h }[0], {{\[}}[[PTR]]{{\]}}
 ; CHECK-DAG: ins v[[R]].h[1], v0.h[1]
 ; CHECK-DAG: ins v[[R]].h[2], v0.h[2]
 ; CHECK-DAG: ins v[[R]].h[3], v0.h[3]
@@ -922,7 +923,9 @@ define <4 x i16> @test_extracts_inserts_varidx_extract(<8 x i16> %x, i32 %idx) {
 }
 
 ; CHECK-LABEL: test_extracts_inserts_varidx_insert:
-; CHECK: str h0, [{{.*}}, w0, sxtw #1]
+; CHECK: and [[MASKED_IDX:x[0-9]+]], x0, #0x3
+; CHECK: bfi x9, [[MASKED_IDX]], #1, #2
+; CHECK: st1 { v0.h }[0], [x9]
 ; CHECK-DAG: ldr d[[R:[0-9]+]]
 ; CHECK-DAG: ins v[[R]].h[1], v0.h[1]
 ; CHECK-DAG: ins v[[R]].h[2], v0.h[2]
@@ -1405,7 +1408,7 @@ define <4 x i16> @concat_vector_v4i16_const() {
 
 define <4 x i16> @concat_vector_v4i16_const_one() {
 ; CHECK-LABEL: concat_vector_v4i16_const_one:
-; CHECK: movi {{v[0-9]+}}.4h, #0x1
+; CHECK: movi {{v[0-9]+}}.4h, #1
  %r = shufflevector <1 x i16> <i16 1>, <1 x i16> undef, <4 x i32> zeroinitializer
  ret <4 x i16> %r
 }
@@ -1433,7 +1436,7 @@ define <8 x i16> @concat_vector_v8i16_const() {
 
 define <8 x i16> @concat_vector_v8i16_const_one() {
 ; CHECK-LABEL: concat_vector_v8i16_const_one:
-; CHECK: movi {{v[0-9]+}}.8h, #0x1
+; CHECK: movi {{v[0-9]+}}.8h, #1
  %r = shufflevector <1 x i16> <i16 1>, <1 x i16> undef, <8 x i32> zeroinitializer
  ret <8 x i16> %r
 }

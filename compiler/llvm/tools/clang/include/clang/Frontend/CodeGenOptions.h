@@ -44,15 +44,17 @@ protected:
 class CodeGenOptions : public CodeGenOptionsBase {
 public:
   enum InliningMethod {
-    NoInlining,         // Perform no inlining whatsoever.
     NormalInlining,     // Use the standard function inlining pass.
+    OnlyHintInlining,   // Inline only (implicitly) hinted functions.
     OnlyAlwaysInlining  // Only run the always inlining pass.
   };
 
   enum VectorLibrary {
-    NoLibrary, // Don't use any vector library.
-    Accelerate // Use the Accelerate framework.
+    NoLibrary,  // Don't use any vector library.
+    Accelerate, // Use the Accelerate framework.
+    SVML        // Intel short vector math library.
   };
+
 
   enum ObjCDispatchMethodKind {
     Legacy = 0,
@@ -80,17 +82,29 @@ public:
   };
 
   enum ProfileInstrKind {
-    ProfileNoInstr,    // No instrumentation.
-    ProfileClangInstr  // Clang instrumentation to generate execution counts
+    ProfileNone,       // Profile instrumentation is turned off.
+    ProfileClangInstr, // Clang instrumentation to generate execution counts
                        // to use with PGO.
+    ProfileIRInstr,    // IR level PGO instrumentation in LLVM.
+  };
+
+  enum EmbedBitcodeKind {
+    Embed_Off,      // No embedded bitcode.
+    Embed_All,      // Embed both bitcode and commandline in the output.
+    Embed_Bitcode,  // Embed just the bitcode in the output.
+    Embed_Marker    // Embed a marker as a placeholder for bitcode.
   };
 
   /// The code model to use (-mcmodel).
   std::string CodeModel;
 
-  /// The filename with path we use for coverage files. The extension will be
-  /// replaced.
-  std::string CoverageFile;
+  /// The filename with path we use for coverage data files. The runtime
+  /// allows further manipulation with the GCOV_PREFIX and GCOV_PREFIX_STRIP
+  /// environment variables.
+  std::string CoverageDataFile;
+
+  /// The filename with path we use for coverage notes files.
+  std::string CoverageNotesFile;
 
   /// The version string to put into coverage files.
   char CoverageVersion[4];
@@ -109,6 +123,9 @@ public:
 
   /// The ABI to use for passing floating point arguments.
   std::string FloatABI;
+
+  /// The floating-point denormal mode to use.
+  std::string FPDenormalMode;
 
   /// The float precision limit to use, if non-empty.
   std::string LimitFloatPrecision;
@@ -152,19 +169,20 @@ public:
   std::string SampleProfileFile;
 
   /// Name of the profile file to use as input for -fprofile-instr-use
-  std::string InstrProfileInput;
+  std::string ProfileInstrumentUsePath;
 
   /// Name of the function summary index file to use for ThinLTO function
   /// importing.
   std::string ThinLTOIndexFile;
 
-  /// The EABI version to use
-  std::string EABIVersion;
-
   /// A list of file names passed with -fcuda-include-gpubinary options to
   /// forward to CUDA runtime back-end for incorporating them into host-side
   /// object file.
   std::vector<std::string> CudaGpuBinaryFileNames;
+
+  /// The name of the file to which the backend should save YAML optimization
+  /// records.
+  std::string OptRecordFile;
 
   /// Regular expression to select optimizations for which we should enable
   /// optimization remarks. Transformation passes whose name matches this
@@ -198,6 +216,9 @@ public:
   /// Set of sanitizer checks that trap rather than diagnose.
   SanitizerSet SanitizeTrap;
 
+  /// List of backend command-line options for -fembed-bitcode.
+  std::vector<uint8_t> CmdArgs;
+
   /// \brief A list of all -fno-builtin-* function names (e.g., memset).
   std::vector<std::string> NoBuiltinFuncs;
 
@@ -223,6 +244,22 @@ public:
   bool hasProfileClangInstr() const {
     return getProfileInstr() == ProfileClangInstr;
   }
+
+  /// \brief Check if IR level profile instrumentation is on.
+  bool hasProfileIRInstr() const {
+    return getProfileInstr() == ProfileIRInstr;
+  }
+
+  /// \brief Check if Clang profile use is on.
+  bool hasProfileClangUse() const {
+    return getProfileUse() == ProfileClangInstr;
+  }
+
+  /// \brief Check if IR level profile use is on.
+  bool hasProfileIRUse() const {
+    return getProfileUse() == ProfileIRInstr;
+  }
+
 };
 
 }  // end namespace clang

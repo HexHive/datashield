@@ -56,8 +56,7 @@ isSimpleEnoughValueToCommitHelper(Constant *C,
     return true;
 
   // Aggregate values are safe if all their elements are.
-  if (isa<ConstantArray>(C) || isa<ConstantStruct>(C) ||
-      isa<ConstantVector>(C)) {
+  if (isa<ConstantAggregate>(C)) {
     for (Value *Op : C->operands())
       if (!isSimpleEnoughValueToCommit(cast<Constant>(Op), SimpleConstants, DL))
         return false;
@@ -204,9 +203,9 @@ bool Evaluator::EvaluateBlock(BasicBlock::iterator CurInst,
         return false;  // no volatile/atomic accesses.
       }
       Constant *Ptr = getVal(SI->getOperand(1));
-      if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Ptr)) {
+      if (auto *FoldedPtr = ConstantFoldConstant(Ptr, DL, TLI)) {
         DEBUG(dbgs() << "Folding constant ptr expression: " << *Ptr);
-        Ptr = ConstantFoldConstantExpression(CE, DL, TLI);
+        Ptr = FoldedPtr;
         DEBUG(dbgs() << "; To: " << *Ptr << "\n");
       }
       if (!isSimpleEnoughPointerToCommit(Ptr)) {
@@ -250,8 +249,8 @@ bool Evaluator::EvaluateBlock(BasicBlock::iterator CurInst,
               Constant * const IdxList[] = {IdxZero, IdxZero};
 
               Ptr = ConstantExpr::getGetElementPtr(nullptr, Ptr, IdxList);
-              if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Ptr))
-                Ptr = ConstantFoldConstantExpression(CE, DL, TLI);
+              if (auto *FoldedPtr = ConstantFoldConstant(Ptr, DL, TLI))
+                Ptr = FoldedPtr;
 
             // If we can't improve the situation by introspecting NewTy,
             // we have to give up.
@@ -325,8 +324,8 @@ bool Evaluator::EvaluateBlock(BasicBlock::iterator CurInst,
       }
 
       Constant *Ptr = getVal(LI->getOperand(0));
-      if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Ptr)) {
-        Ptr = ConstantFoldConstantExpression(CE, DL, TLI);
+      if (auto *FoldedPtr = ConstantFoldConstant(Ptr, DL, TLI)) {
+        Ptr = FoldedPtr;
         DEBUG(dbgs() << "Found a constant pointer expression, constant "
               "folding: " << *Ptr << "\n");
       }
@@ -428,7 +427,7 @@ bool Evaluator::EvaluateBlock(BasicBlock::iterator CurInst,
 
       // Resolve function pointers.
       Function *Callee = dyn_cast<Function>(getVal(CS.getCalledValue()));
-      if (!Callee || Callee->mayBeOverridden()) {
+      if (!Callee || Callee->isInterposable()) {
         DEBUG(dbgs() << "Can not resolve function pointer.\n");
         return false;  // Cannot resolve.
       }
@@ -513,8 +512,8 @@ bool Evaluator::EvaluateBlock(BasicBlock::iterator CurInst,
     }
 
     if (!CurInst->use_empty()) {
-      if (ConstantExpr *CE = dyn_cast<ConstantExpr>(InstResult))
-        InstResult = ConstantFoldConstantExpression(CE, DL, TLI);
+      if (auto *FoldedInstResult = ConstantFoldConstant(InstResult, DL, TLI))
+        InstResult = FoldedInstResult;
 
       setVal(&*CurInst, InstResult);
     }
@@ -538,7 +537,7 @@ bool Evaluator::EvaluateFunction(Function *F, Constant *&RetVal,
                                  const SmallVectorImpl<Constant*> &ActualArgs) {
   // Check to see if this function is already executing (recursion).  If so,
   // bail out.  TODO: we might want to accept limited recursion.
-  if (std::find(CallStack.begin(), CallStack.end(), F) != CallStack.end())
+  if (is_contained(CallStack, F))
     return false;
 
   CallStack.push_back(F);

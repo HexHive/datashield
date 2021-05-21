@@ -334,7 +334,7 @@ void MachObjectWriter::writeNlist(MachSymbolData &MSD,
     if (AliaseeInfo)
       SectionIndex = AliaseeInfo->SectionIndex;
     Symbol = AliasedSymbol;
-    // FIXME: Should this update Data as well?  Do we need OrigSymbol at all?
+    // FIXME: Should this update Data as well?
   }
 
   // Set the N_TYPE bits. See <mach-o/nlist.h>.
@@ -377,7 +377,9 @@ void MachObjectWriter::writeNlist(MachSymbolData &MSD,
 
   // The Mach-O streamer uses the lowest 16-bits of the flags for the 'desc'
   // value.
-  write16(cast<MCSymbolMachO>(Symbol)->getEncodedFlags());
+  bool EncodeAsAltEntry =
+    IsAlias && cast<MCSymbolMachO>(OrigSymbol).isAltEntry();
+  write16(cast<MCSymbolMachO>(Symbol)->getEncodedFlags(EncodeAsAltEntry));
   if (is64Bit())
     write64(Address);
   else
@@ -420,7 +422,7 @@ void MachObjectWriter::writeLinkerOptionsLoadCommand(
   uint64_t BytesWritten = sizeof(MachO::linker_option_command);
   for (const std::string &Option : Options) {
     // Write each string, including the null byte.
-    writeBytes(Option.c_str(), Option.size() + 1);
+    writeBytes(Option, Option.size() + 1);
     BytesWritten += Option.size() + 1;
   }
 
@@ -455,6 +457,7 @@ void MachObjectWriter::bindIndirectSymbols(MCAssembler &Asm) {
 
     if (Section.getType() != MachO::S_NON_LAZY_SYMBOL_POINTERS &&
         Section.getType() != MachO::S_LAZY_SYMBOL_POINTERS &&
+        Section.getType() != MachO::S_THREAD_LOCAL_VARIABLE_POINTERS &&
         Section.getType() != MachO::S_SYMBOL_STUBS) {
       MCSymbol &Symbol = *it->Symbol;
       report_fatal_error("indirect symbol '" + Symbol.getName() +
@@ -468,7 +471,8 @@ void MachObjectWriter::bindIndirectSymbols(MCAssembler &Asm) {
          ie = Asm.indirect_symbol_end(); it != ie; ++it, ++IndirectIndex) {
     const MCSectionMachO &Section = cast<MCSectionMachO>(*it->Section);
 
-    if (Section.getType() != MachO::S_NON_LAZY_SYMBOL_POINTERS)
+    if (Section.getType() != MachO::S_NON_LAZY_SYMBOL_POINTERS &&
+        Section.getType() !=  MachO::S_THREAD_LOCAL_VARIABLE_POINTERS)
       continue;
 
     // Initialize the section indirect symbol base, if necessary.
@@ -878,7 +882,7 @@ void MachObjectWriter::writeObject(MCAssembler &Asm,
                                               sizeof(MachO::nlist_64) :
                                               sizeof(MachO::nlist));
     writeSymtabLoadCommand(SymbolTableOffset, NumSymTabSymbols,
-                           StringTableOffset, StringTable.data().size());
+                           StringTableOffset, StringTable.getSize());
 
     writeDysymtabLoadCommand(FirstLocalSymbol, NumLocalSymbols,
                              FirstExternalSymbol, NumExternalSymbols,
@@ -973,7 +977,7 @@ void MachObjectWriter::writeObject(MCAssembler &Asm,
         writeNlist(Entry, Layout);
 
     // Write the string table.
-    getStream() << StringTable.data();
+    StringTable.write(getStream());
   }
 }
 

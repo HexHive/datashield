@@ -18,8 +18,8 @@
 #include "clang/Lex/MacroInfo.h"
 #include "clang/Lex/Preprocessor.h"
 #include "llvm/ADT/SmallString.h"
-using namespace clang;
 
+using namespace clang;
 
 /// Create a TokenLexer for the specified macro with the specified actual
 /// arguments.  Note that this ctor takes ownership of the ActualArgs pointer.
@@ -76,8 +76,6 @@ void TokenLexer::Init(Token &Tok, SourceLocation ELEnd, MacroInfo *MI,
   Macro->DisableMacro();
 }
 
-
-
 /// Create a TokenLexer for the specified token stream.  This does not
 /// take ownership of the specified token vector.
 void TokenLexer::Init(const Token *TokArray, unsigned NumToks,
@@ -106,7 +104,6 @@ void TokenLexer::Init(const Token *TokArray, unsigned NumToks,
     HasLeadingSpace = TokArray[0].hasLeadingSpace();
   }
 }
-
 
 void TokenLexer::destroy() {
   // If this was a function-like macro that actually uses its arguments, delete
@@ -174,7 +171,6 @@ bool TokenLexer::MaybeRemoveCommaBeforeVaArgs(
 /// Expand the arguments of a function-like macro so that we can quickly
 /// return preexpanded tokens from Tokens.
 void TokenLexer::ExpandFunctionArguments() {
-
   SmallVector<Token, 128> ResultToks;
 
   // Loop through 'Tokens', expanding them into ResultToks.  Keep
@@ -279,7 +275,7 @@ void TokenLexer::ExpandFunctionArguments() {
 
       // If the arg token expanded into anything, append it.
       if (ResultArgToks->isNot(tok::eof)) {
-        unsigned FirstResult = ResultToks.size();
+        size_t FirstResult = ResultToks.size();
         unsigned NumToks = MacroArgs::getArgLength(ResultArgToks);
         ResultToks.append(ResultArgToks, ResultArgToks+NumToks);
 
@@ -293,8 +289,8 @@ void TokenLexer::ExpandFunctionArguments() {
 
         // If the '##' came from expanding an argument, turn it into 'unknown'
         // to avoid pasting.
-        for (unsigned i = FirstResult, e = ResultToks.size(); i != e; ++i) {
-          Token &Tok = ResultToks[i];
+        for (Token &Tok : llvm::make_range(ResultToks.begin() + FirstResult,
+                                           ResultToks.end())) {
           if (Tok.is(tok::hashhash))
             Tok.setKind(tok::unknown);
         }
@@ -337,9 +333,8 @@ void TokenLexer::ExpandFunctionArguments() {
 
       // If the '##' came from expanding an argument, turn it into 'unknown'
       // to avoid pasting.
-      for (unsigned i = ResultToks.size() - NumToks, e = ResultToks.size();
-             i != e; ++i) {
-        Token &Tok = ResultToks[i];
+      for (Token &Tok : llvm::make_range(ResultToks.end() - NumToks,
+                                         ResultToks.end())) {
         if (Tok.is(tok::hashhash))
           Tok.setKind(tok::unknown);
       }
@@ -394,8 +389,6 @@ void TokenLexer::ExpandFunctionArguments() {
       MaybeRemoveCommaBeforeVaArgs(ResultToks,
                                    /*HasPasteOperator=*/true,
                                    Macro, ArgNo, PP);
-
-    continue;
   }
 
   // If anything changed, install this as the new Tokens list.
@@ -800,6 +793,10 @@ static void updateConsecutiveMacroArgTokens(SourceManager &SM,
     // "characters" away.
     if (RelOffs < 0 || RelOffs > 50)
       break;
+
+    if (CurLoc.isMacroID() && !SM.isWrittenInSameFile(CurLoc, NextLoc))
+      break; // Token from a different macro.
+
     CurLoc = NextLoc;
   }
 

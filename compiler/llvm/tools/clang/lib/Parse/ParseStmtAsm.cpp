@@ -200,9 +200,7 @@ ExprResult Parser::ParseMSAsmIdentifier(llvm::SmallVectorImpl<Token> &LineToks,
   // Also copy the current token over.
   LineToks.push_back(Tok);
 
-  PP.EnterTokenStream(LineToks.begin(), LineToks.size(),
-                      /*disable macros*/ true,
-                      /*owns tokens*/ false);
+  PP.EnterTokenStream(LineToks, /*DisableMacroExpansions*/ true);
 
   // Clear the current token and advance to the first token in LineToks.
   ConsumeAnyToken();
@@ -337,6 +335,33 @@ static bool buildMSAsmString(Preprocessor &PP, SourceLocation AsmLoc,
   return false;
 }
 
+/// isTypeQualifier - Return true if the current token could be the
+/// start of a type-qualifier-list.
+static bool isTypeQualifier(const Token &Tok) {
+  switch (Tok.getKind()) {
+  default: return false;
+  // type-qualifier
+  case tok::kw_const:
+  case tok::kw_volatile:
+  case tok::kw_restrict:
+  case tok::kw___private:
+  case tok::kw___local:
+  case tok::kw___global:
+  case tok::kw___constant:
+  case tok::kw___generic:
+  case tok::kw___read_only:
+  case tok::kw___read_write:
+  case tok::kw___write_only:
+    return true;
+  }
+}
+
+// Determine if this is a GCC-style asm statement.
+static bool isGCCAsmStatement(const Token &TokAfterAsm) {
+  return TokAfterAsm.is(tok::l_paren) || TokAfterAsm.is(tok::kw_goto) ||
+         isTypeQualifier(TokAfterAsm);
+}
+
 /// ParseMicrosoftAsmStatement. When -fms-extensions/-fasm-blocks is enabled,
 /// this routine is called to collect the tokens for an MS asm statement.
 ///
@@ -392,6 +417,7 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
     if (!InAsmComment && Tok.is(tok::l_brace)) {
       // Consume the opening brace.
       SkippedStartOfLine = Tok.isAtStartOfLine();
+      AsmToks.push_back(Tok);
       EndLoc = ConsumeBrace();
       BraceNesting++;
       LBraceLocs.push_back(EndLoc);
@@ -416,15 +442,19 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
       if (ExpLoc.first != FID ||
           SrcMgr.getLineNumber(ExpLoc.first, ExpLoc.second) != LineNo) {
         // If this is a single-line __asm, we're done, except if the next
-        // line begins with an __asm too, in which case we finish a comment
+        // line is MS-style asm too, in which case we finish a comment
         // if needed and then keep processing the next line as a single
         // line __asm.
         bool isAsm = Tok.is(tok::kw_asm);
-        if (SingleLineMode && !isAsm)
+        if (SingleLineMode && (!isAsm || isGCCAsmStatement(NextToken())))
           break;
         // We're no longer in a comment.
         InAsmComment = false;
         if (isAsm) {
+          // If this is a new __asm {} block we want to process it seperately
+          // from the single-line __asm statements
+          if (PP.LookAhead(0).is(tok::l_brace))
+            break;
           LineNo = SrcMgr.getLineNumber(ExpLoc.first, ExpLoc.second);
           SkippedStartOfLine = Tok.isAtStartOfLine();
         }
@@ -440,6 +470,11 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
         BraceCount == (savedBraceCount + BraceNesting)) {
       // Consume the closing brace.
       SkippedStartOfLine = Tok.isAtStartOfLine();
+      // Don't want to add the closing brace of the whole asm block
+      if (SingleLineMode || BraceNesting > 1) {
+        Tok.clearFlag(Token::LeadingSpace);
+        AsmToks.push_back(Tok);
+      }
       EndLoc = ConsumeBrace();
       BraceNesting--;
       // Finish if all of the opened braces in the inline asm section were
@@ -537,8 +572,8 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
 
   llvm::SourceMgr TempSrcMgr;
   llvm::MCContext Ctx(MAI.get(), MRI.get(), MOFI.get(), &TempSrcMgr);
-  MOFI->InitMCObjectFileInfo(TheTriple, llvm::Reloc::Default,
-                             llvm::CodeModel::Default, Ctx);
+  MOFI->InitMCObjectFileInfo(TheTriple, /*PIC*/ false, llvm::CodeModel::Default,
+                             Ctx);
   std::unique_ptr<llvm::MemoryBuffer> Buffer =
       llvm::MemoryBuffer::getMemBuffer(AsmString, "<MS inline asm>");
 
@@ -635,8 +670,7 @@ StmtResult Parser::ParseAsmStatement(bool &msAsm) {
   assert(Tok.is(tok::kw_asm) && "Not an asm stmt");
   SourceLocation AsmLoc = ConsumeToken();
 
-  if (getLangOpts().AsmBlocks && Tok.isNot(tok::l_paren) &&
-      !isTypeQualifier()) {
+  if (getLangOpts().AsmBlocks && !isGCCAsmStatement(Tok)) {
     msAsm = true;
     return ParseMicrosoftAsmStatement(AsmLoc);
   }
@@ -647,15 +681,23 @@ StmtResult Parser::ParseAsmStatement(bool &msAsm) {
 
   // GNU asms accept, but warn, about type-qualifiers other than volatile.
   if (DS.getTypeQualifiers() & DeclSpec::TQ_const)
-    Diag(Loc, diag::w_asm_qualifier_ignored) << "const";
+    Diag(Loc, diag::warn_asm_qualifier_ignored) << "const";
   if (DS.getTypeQualifiers() & DeclSpec::TQ_restrict)
-    Diag(Loc, diag::w_asm_qualifier_ignored) << "restrict";
+    Diag(Loc, diag::warn_asm_qualifier_ignored) << "restrict";
   // FIXME: Once GCC supports _Atomic, check whether it permits it here.
   if (DS.getTypeQualifiers() & DeclSpec::TQ_atomic)
-    Diag(Loc, diag::w_asm_qualifier_ignored) << "_Atomic";
+    Diag(Loc, diag::warn_asm_qualifier_ignored) << "_Atomic";
 
   // Remember if this was a volatile asm.
   bool isVolatile = DS.getTypeQualifiers() & DeclSpec::TQ_volatile;
+
+  // TODO: support "asm goto" constructs (PR#9295).
+  if (Tok.is(tok::kw_goto)) {
+    Diag(Tok, diag::err_asm_goto_not_supported_yet);
+    SkipUntil(tok::r_paren, StopAtSemi);
+    return StmtError();
+  }
+
   if (Tok.isNot(tok::l_paren)) {
     Diag(Tok, diag::err_expected_lparen_after) << "asm";
     SkipUntil(tok::r_paren, StopAtSemi);

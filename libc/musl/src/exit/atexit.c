@@ -24,11 +24,12 @@ void __funcs_on_exit()
 		func = head->f[slot];
 		arg = head->a[slot];
 		UNLOCK(lock);
-#ifdef __USE_DATASHIELD
-    __ds_unsafe_clone(func, arg);
-#else
+// This may no longer be needed since __libc_start_main updates the stack and env variables differently now.
+//#ifdef __USE_DATASHIELD
+//    __ds_unsafe_clone(func, arg);
+//#else
 		func(arg);
-#endif
+//#endif
 		LOCK(lock);
 	}
 }

@@ -23,6 +23,8 @@
 #  include <unistd.h>
 #endif
 
+extern int indextest_core_main(int argc, const char **argv);
+
 /******************************************************************************/
 /* Utility functions.                                                         */
 /******************************************************************************/
@@ -78,6 +80,8 @@ static unsigned getDefaultParsingOptions() {
     options |= CXTranslationUnit_IncludeBriefCommentsInCodeCompletion;
   if (getenv("CINDEXTEST_CREATE_PREAMBLE_ON_FIRST_PARSE"))
     options |= CXTranslationUnit_CreatePreambleOnFirstParse;
+  if (getenv("CINDEXTEST_KEEP_GOING"))
+    options |= CXTranslationUnit_KeepGoing;
 
   return options;
 }
@@ -768,9 +772,20 @@ static void PrintCursor(CXCursor Cursor, const char *CommentSchemaFile) {
     
     clang_disposeString(DeprecatedMessage);
     clang_disposeString(UnavailableMessage);
-    
+
+    if (clang_CXXConstructor_isDefaultConstructor(Cursor))
+      printf(" (default constructor)");
+
+    if (clang_CXXConstructor_isMoveConstructor(Cursor))
+      printf(" (move constructor)");
+    if (clang_CXXConstructor_isCopyConstructor(Cursor))
+      printf(" (copy constructor)");
+    if (clang_CXXConstructor_isConvertingConstructor(Cursor))
+      printf(" (converting constructor)");
     if (clang_CXXField_isMutable(Cursor))
       printf(" (mutable)");
+    if (clang_CXXMethod_isDefaulted(Cursor))
+      printf(" (defaulted)");
     if (clang_CXXMethod_isStatic(Cursor))
       printf(" (static)");
     if (clang_CXXMethod_isVirtual(Cursor))
@@ -823,8 +838,11 @@ static void PrintCursor(CXCursor Cursor, const char *CommentSchemaFile) {
 
       if (Cursor.kind == CXCursor_FunctionDecl) {
         /* Collect the template parameter kinds from the base template. */
-        unsigned NumTemplateArgs = clang_Cursor_getNumTemplateArguments(Cursor);
-        unsigned I;
+        int NumTemplateArgs = clang_Cursor_getNumTemplateArguments(Cursor);
+        int I;
+        if (NumTemplateArgs < 0) {
+          printf(" [no template arg info]");
+        }
         for (I = 0; I < NumTemplateArgs; I++) {
           enum CXTemplateArgumentKind TAK =
               clang_Cursor_getTemplateArgumentKind(Cursor, I);
@@ -922,6 +940,7 @@ static void PrintCursor(CXCursor Cursor, const char *CommentSchemaFile) {
         PRINT_PROP_ATTR(weak);
         PRINT_PROP_ATTR(strong);
         PRINT_PROP_ATTR(unsafe_unretained);
+        PRINT_PROP_ATTR(class);
         printf("]");
       }
     }
@@ -1297,6 +1316,25 @@ static enum CXVisitorResult FieldVisitor(CXCursor C,
     return CXVisit_Continue;
 }
 
+static void PrintTypeTemplateArgs(CXType T, const char *Format) {
+  int NumTArgs = clang_Type_getNumTemplateArguments(T);
+  if (NumTArgs != -1 && NumTArgs != 0) {
+    int i;
+    CXType TArg;
+    printf(Format, NumTArgs);
+    for (i = 0; i < NumTArgs; ++i) {
+      TArg = clang_Type_getTemplateArgumentAsType(T, i);
+      if (TArg.kind != CXType_Invalid) {
+        PrintTypeAndTypeKind(TArg, " [type=%s] [typekind=%s]");
+      }
+    }
+    /* Ensure that the returned type is invalid when indexing off-by-one. */
+    TArg = clang_Type_getTemplateArgumentAsType(T, i);
+    assert(TArg.kind == CXType_Invalid);
+    printf("]");
+  }
+}
+
 static enum CXChildVisitResult PrintType(CXCursor cursor, CXCursor p,
                                          CXClientData d) {
   if (!clang_isInvalid(clang_getCursorKind(cursor))) {
@@ -1314,11 +1352,14 @@ static enum CXChildVisitResult PrintType(CXCursor cursor, CXCursor p,
       printf(" lvalue-ref-qualifier");
     if (RQ == CXRefQualifier_RValue)
       printf(" rvalue-ref-qualifier");
+    /* Print the template argument types if they exist. */
+    PrintTypeTemplateArgs(T, " [templateargs/%d=");
     /* Print the canonical type if it is different. */
     {
       CXType CT = clang_getCanonicalType(T);
       if (!clang_equalTypes(T, CT)) {
         PrintTypeAndTypeKind(CT, " [canonicaltype=%s] [canonicaltypekind=%s]");
+        PrintTypeTemplateArgs(CT, " [canonicaltemplateargs/%d=");
       }
     }
     /* Print the return type if it exists. */
@@ -1338,21 +1379,6 @@ static enum CXChildVisitResult PrintType(CXCursor cursor, CXCursor p,
           CXType T = clang_getCursorType(clang_Cursor_getArgument(cursor, i));
           if (T.kind != CXType_Invalid) {
             PrintTypeAndTypeKind(T, " [%s] [%s]");
-          }
-        }
-        printf("]");
-      }
-    }
-    /* Print the template argument types if they exist. */
-    {
-      int NumTArgs = clang_Type_getNumTemplateArguments(T);
-      if (NumTArgs != -1 && NumTArgs != 0) {
-        int i;
-        printf(" [templateargs/%d=", NumTArgs);
-        for (i = 0; i < NumTArgs; ++i) {
-          CXType TArg = clang_Type_getTemplateArgumentAsType(T, i);
-          if (TArg.kind != CXType_Invalid) {
-            PrintTypeAndTypeKind(TArg, " [type=%s] [typekind=%s]");
           }
         }
         printf("]");
@@ -1417,10 +1443,10 @@ static enum CXChildVisitResult PrintTypeSize(CXCursor cursor, CXCursor p,
     CXString FieldSpelling = clang_getCursorSpelling(cursor);
     const char *FieldName = clang_getCString(FieldSpelling);
     /* recurse to get the first parent record that is not anonymous. */
-    CXCursor Parent, Record;
     unsigned RecordIsAnonymous = 0;
     if (clang_getCursorKind(cursor) == CXCursor_FieldDecl) {
-      Record = Parent = p;
+      CXCursor Record;
+      CXCursor Parent = p;
       do {
         Record = Parent;
         Parent = clang_getCursorSemanticParent(Record);
@@ -1993,6 +2019,7 @@ static void print_completion_result(CXCompletionResult *completion_result,
   enum CXCursorKind ParentKind;
   CXString ParentName;
   CXString BriefComment;
+  CXString Annotation;
   const char *BriefCommentCString;
   
   fprintf(file, "%s:", clang_getCString(ks));
@@ -2026,9 +2053,10 @@ static void print_completion_result(CXCompletionResult *completion_result,
     for (i = 0; i < annotationCount; ++i) {
       if (i != 0)
         fprintf(file, ", ");
-      fprintf(file, "\"%s\"",
-              clang_getCString(clang_getCompletionAnnotation(
-                                 completion_result->CompletionString, i)));
+      Annotation =
+          clang_getCompletionAnnotation(completion_result->CompletionString, i);
+      fprintf(file, "\"%s\"", clang_getCString(Annotation));
+      clang_disposeString(Annotation);
     }
     fprintf(file, ")");
   }
@@ -2128,25 +2156,6 @@ void print_completion_contexts(unsigned long long contexts, FILE *file) {
   if (contexts & CXCompletionContext_NaturalLanguage) {
     fprintf(file, "Natural language\n");
   }
-}
-
-int my_stricmp(const char *s1, const char *s2) {
-  while (*s1 && *s2) {
-    int c1 = tolower((unsigned char)*s1), c2 = tolower((unsigned char)*s2);
-    if (c1 < c2)
-      return -1;
-    else if (c1 > c2)
-      return 1;
-    
-    ++s1;
-    ++s2;
-  }
-  
-  if (*s1)
-    return 1;
-  else if (*s2)
-    return -1;
-  return 0;
 }
 
 int perform_code_completion(int argc, const char **argv, int timing_only) {
@@ -2460,8 +2469,14 @@ static void display_evaluate_results(CXEvalResult result) {
   switch (clang_EvalResult_getKind(result)) {
     case CXEval_Int:
     {
-      int val = clang_EvalResult_getAsInt(result);
-      printf("Kind: Int , Value: %d", val);
+      printf("Kind: Int, ");
+      if (clang_EvalResult_isUnsignedInt(result)) {
+        unsigned long long val = clang_EvalResult_getAsUnsigned(result);
+        printf("unsigned, Value: %llu", val);
+      } else {
+        long long val = clang_EvalResult_getAsLongLong(result);
+        printf("Value: %lld", val);
+      }
       break;
     }
     case CXEval_Float:
@@ -4410,13 +4425,15 @@ int cindextest_main(int argc, const char **argv) {
  * size). */
 
 typedef struct thread_info {
+  int (*main_func)(int argc, const char **argv);
   int argc;
   const char **argv;
   int result;
 } thread_info;
 void thread_runner(void *client_data_v) {
   thread_info *client_data = client_data_v;
-  client_data->result = cindextest_main(client_data->argc, client_data->argv);
+  client_data->result = client_data->main_func(client_data->argc,
+                                               client_data->argv);
 }
 
 static void flush_atexit(void) {
@@ -4435,11 +4452,16 @@ int main(int argc, const char **argv) {
   LIBXML_TEST_VERSION
 #endif
 
-  if (getenv("CINDEXTEST_NOTHREADS"))
-    return cindextest_main(argc, argv);
-
+  client_data.main_func = cindextest_main;
   client_data.argc = argc;
   client_data.argv = argv;
+
+  if (argc > 1 && strcmp(argv[1], "core") == 0)
+    client_data.main_func = indextest_core_main;
+
+  if (getenv("CINDEXTEST_NOTHREADS"))
+    return client_data.main_func(client_data.argc, client_data.argv);
+
   clang_executeOnThread(thread_runner, &client_data, 0);
   return client_data.result;
 }

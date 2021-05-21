@@ -1,0 +1,133 @@
+# RUN: llc -mtriple=x86_64-linux-gnu -mattr=+mpx,+separate-stack-seg -start-before x86-safestack-bounds-checking-combiner -stop-after x86-safestack-bounds-checking-combiner -o - %s | FileCheck %s
+
+--- |
+
+  @__safestack_unsafe_stack_ptr = external thread_local(initialexec) global i8*
+
+  ; Function Attrs: nounwind safestack uwtable
+  define void @overflow_gep_store() #0 {
+  entry:
+    %unsafe_stack_ptr = load i8*, i8** @__safestack_unsafe_stack_ptr
+    %unsafe_stack_static_top = getelementptr i8, i8* %unsafe_stack_ptr, i32 -16
+    store i8* %unsafe_stack_static_top, i8** @__safestack_unsafe_stack_ptr
+    %0 = getelementptr i8, i8* %unsafe_stack_ptr, i32 -8
+    %a.unsafe = bitcast i8* %0 to i32*
+    %1 = bitcast i32* %a.unsafe to i8*
+    %2 = getelementptr i8, i8* %1, i32 4
+    %3 = getelementptr i8, i8* %2, i64 1
+    call void asm "bndcu $0, %bnd0", "*m"(i8* %3)
+    store i8 0, i8* %2
+    %4 = getelementptr i8, i8* %unsafe_stack_ptr, i32 -4
+    %b.unsafe = bitcast i8* %4 to i32*
+    %5 = bitcast i32* %b.unsafe to i8*
+    %6 = getelementptr i8, i8* %5, i32 4
+    %7 = getelementptr i8, i8* %6, i64 1
+    call void asm "bndcu $0, %bnd0", "*m"(i8* %7)
+    store i8 0, i8* %6
+    store i8* %unsafe_stack_ptr, i8** @__safestack_unsafe_stack_ptr
+    ret void
+  }
+
+  %struct.glob_s = type { i32, i32 }
+
+  @x = external local_unnamed_addr global [1 x %struct.glob_s], align 4
+
+  ; Function Attrs: nounwind safestack uwtable
+  define void @glob_access(i32 %i) local_unnamed_addr #0 {
+  entry:
+    %idxprom = sext i32 %i to i64
+    %y = getelementptr inbounds [1 x %struct.glob_s], [1 x %struct.glob_s]* @x, i64 0, i64 %idxprom, i32 0
+    %0 = bitcast i32* %y to i8*
+    %1 = getelementptr i8, i8* %0, i64 4
+    call void asm "bndcu $0, %bnd0", "*m"(i8* %1)
+    store i32 0, i32* %y, align 4
+    %z = getelementptr inbounds [1 x %struct.glob_s], [1 x %struct.glob_s]* @x, i64 0, i64 %idxprom, i32 1
+    %2 = bitcast i32* %z to i8*
+    %3 = getelementptr i8, i8* %2, i64 4
+    call void asm "bndcu $0, %bnd0", "*m"(i8* %3)
+    store i32 0, i32* %z, align 4
+    ret void
+  }
+
+  attributes #0 = { nounwind safestack uwtable "target-features"="+mpx,+separate-stack-seg" }
+
+...
+---
+name:            overflow_gep_store
+# CHECK-LABEL: name:            overflow_gep_store
+alignment:       4
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+tracksRegLiveness: true
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       0
+  offsetAdjustment: 0
+  maxAlignment:    0
+  adjustsStack:    false
+  hasCalls:        false
+  maxCallFrameSize: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+body:             |
+  bb.0.entry:
+    %rax = MOV64rm %rip, 1, _, target-flags(x86-gottpoff) @__safestack_unsafe_stack_ptr, _ :: (load 8 from got)
+    %rcx = MOV64rm %rax, 1, _, 0, %fs :: (dereferenceable load 8 from @__safestack_unsafe_stack_ptr)
+    %rdx = LEA64r %rcx, 1, _, -16, _
+    MOV64mr %rax, 1, _, 0, %fs, killed %rdx :: (store 8 into @__safestack_unsafe_stack_ptr)
+    INLINEASM $"bndcu $0, %bnd0", 8, 196654, %rcx, 1, _, -3, _
+    ; CHECK: INLINEASM $"bndcu $0, %bnd0", 8, 196654, %rcx, 1, _, 1, _
+    ; CHECK-NEXT: MOV8mi
+    ; CHECK-NEXT: MOV8mi
+    MOV8mi %rcx, 1, _, -4, _, 0 :: (store 1 into %ir.2)
+    INLINEASM $"bndcu $0, %bnd0", 8, 196654, %rcx, 1, _, 1, _
+    MOV8mi %rcx, 1, _, 0, _, 0 :: (store 1 into %ir.6)
+    MOV64mr killed %rax, 1, _, 0, %fs, killed %rcx :: (store 8 into @__safestack_unsafe_stack_ptr)
+    RETQ
+
+...
+---
+name:            glob_access
+# CHECK-LABEL: glob_access
+alignment:       4
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+tracksRegLiveness: true
+liveins:
+  - { reg: '%edi' }
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       0
+  offsetAdjustment: 0
+  maxAlignment:    0
+  adjustsStack:    false
+  hasCalls:        false
+  maxCallFrameSize: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+body:             |
+  bb.0.entry:
+    liveins: %edi
+
+    %rax = MOVSX64rr32 killed %edi
+    INLINEASM $"bndcu $0, %bnd0", 8, 196654, _, 8, %rax, @x + 4, _
+    ; CHECK: INLINEASM $"bndcu $0, %bnd0", 8, 196654, _, 8, %rax, @x + 8, _
+    MOV32mi _, 8, %rax, @x, _, 0
+    INLINEASM $"bndcu $0, %bnd0", 8, 196654, _, 8, %rax, @x + 8, _
+    ; CHECK-NOT: INLINEASM $"bndcu $0, %bnd0", 8, 196654, _, 8, %rax, @x + 8, _
+    MOV32mi _, 8, killed %rax, @x + 4, _, 0
+    RETQ
+
+...

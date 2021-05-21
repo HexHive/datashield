@@ -18,14 +18,13 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetRegisterInfo.h"
+using namespace llvm;
+using namespace rdf;
 
 #ifndef NDEBUG
 static cl::opt<unsigned> CpLimit("rdf-cp-limit", cl::init(0), cl::Hidden);
 static unsigned CpCount = 0;
 #endif
-
-using namespace llvm;
-using namespace rdf;
 
 bool CopyPropagation::interpretAsCopy(const MachineInstr *MI, EqualityMap &EM) {
   unsigned Opc = MI->getOpcode();
@@ -33,43 +32,19 @@ bool CopyPropagation::interpretAsCopy(const MachineInstr *MI, EqualityMap &EM) {
     case TargetOpcode::COPY: {
       const MachineOperand &Dst = MI->getOperand(0);
       const MachineOperand &Src = MI->getOperand(1);
-      RegisterRef DstR = { Dst.getReg(), Dst.getSubReg() };
-      RegisterRef SrcR = { Src.getReg(), Src.getSubReg() };
-      if (TargetRegisterInfo::isVirtualRegister(DstR.Reg)) {
-        if (!TargetRegisterInfo::isVirtualRegister(SrcR.Reg))
-          return false;
-        MachineRegisterInfo &MRI = DFG.getMF().getRegInfo();
-        if (MRI.getRegClass(DstR.Reg) != MRI.getRegClass(SrcR.Reg))
-          return false;
-      } else if (TargetRegisterInfo::isPhysicalRegister(DstR.Reg)) {
-        if (!TargetRegisterInfo::isPhysicalRegister(SrcR.Reg))
-          return false;
-        const TargetRegisterInfo &TRI = DFG.getTRI();
-        if (TRI.getMinimalPhysRegClass(DstR.Reg) !=
-            TRI.getMinimalPhysRegClass(SrcR.Reg))
-          return false;
-      } else {
-        // Copy between some unknown objects.
+      RegisterRef DstR = DFG.makeRegRef(Dst.getReg(), Dst.getSubReg());
+      RegisterRef SrcR = DFG.makeRegRef(Src.getReg(), Src.getSubReg());
+      assert(TargetRegisterInfo::isPhysicalRegister(DstR.Reg));
+      assert(TargetRegisterInfo::isPhysicalRegister(SrcR.Reg));
+      const TargetRegisterInfo &TRI = DFG.getTRI();
+      if (TRI.getMinimalPhysRegClass(DstR.Reg) !=
+          TRI.getMinimalPhysRegClass(SrcR.Reg))
         return false;
-      }
       EM.insert(std::make_pair(DstR, SrcR));
       return true;
     }
-    case TargetOpcode::REG_SEQUENCE: {
-      const MachineOperand &Dst = MI->getOperand(0);
-      RegisterRef DefR = { Dst.getReg(), Dst.getSubReg() };
-      SmallVector<TargetInstrInfo::RegSubRegPairAndIdx,2> Inputs;
-      const TargetInstrInfo &TII = DFG.getTII();
-      if (!TII.getRegSequenceInputs(*MI, 0, Inputs))
-        return false;
-      for (auto I : Inputs) {
-        unsigned S = DFG.getTRI().composeSubRegIndices(DefR.Sub, I.SubIdx);
-        RegisterRef DR = { DefR.Reg, S };
-        RegisterRef SR = { I.Reg, I.SubReg };
-        EM.insert(std::make_pair(DR, SR));
-      }
-      return true;
-    }
+    case TargetOpcode::REG_SEQUENCE:
+      llvm_unreachable("Unexpected REG_SEQUENCE");
   }
   return false;
 }
@@ -80,7 +55,7 @@ void CopyPropagation::recordCopy(NodeAddr<StmtNode*> SA, EqualityMap &EM) {
   Copies.push_back(SA.Id);
 
   for (auto I : EM) {
-    auto FS = DefM.find(I.second);
+    auto FS = DefM.find(I.second.Reg);
     if (FS == DefM.end() || FS->second.empty())
       continue; // Undefined source
     RDefMap[I.second][SA.Id] = FS->second.top()->Id;
@@ -93,7 +68,7 @@ void CopyPropagation::recordCopy(NodeAddr<StmtNode*> SA, EqualityMap &EM) {
 void CopyPropagation::updateMap(NodeAddr<InstrNode*> IA) {
   RegisterSet RRs;
   for (NodeAddr<RefNode*> RA : IA.Addr->members(DFG))
-    RRs.insert(RA.Addr->getRegRef());
+    RRs.insert(RA.Addr->getRegRef(DFG));
   bool Common = false;
   for (auto &R : RDefMap) {
     if (!RRs.count(R.first))
@@ -107,7 +82,7 @@ void CopyPropagation::updateMap(NodeAddr<InstrNode*> IA) {
   for (auto &R : RDefMap) {
     if (!RRs.count(R.first))
       continue;
-    auto F = DefM.find(R.first);
+    auto F = DefM.find(R.first.Reg);
     if (F == DefM.end() || F->second.empty())
       continue;
     R.second[IA.Id] = F->second.top()->Id;
@@ -169,6 +144,18 @@ bool CopyPropagation::run() {
   bool HasLimit = CpLimit.getNumOccurrences() > 0;
 #endif
 
+  auto MinPhysReg = [this] (RegisterRef RR) -> unsigned {
+    const TargetRegisterInfo &TRI = DFG.getTRI();
+    const TargetRegisterClass &RC = *TRI.getMinimalPhysRegClass(RR.Reg);
+    if ((RC.LaneMask & RR.Mask) == RC.LaneMask)
+      return RR.Reg;
+    for (MCSubRegIndexIterator S(RR.Reg, &TRI); S.isValid(); ++S)
+      if (RR.Mask == TRI.getSubRegIndexLaneMask(S.getSubRegIndex()))
+        return S.getSubReg();
+    llvm_unreachable("Should have found a register");
+    return 0;
+  };
+
   for (auto C : Copies) {
 #ifndef NDEBUG
     if (HasLimit && CpCount >= CpLimit)
@@ -181,7 +168,7 @@ bool CopyPropagation::run() {
 
     EqualityMap &EM = FS->second;
     for (NodeAddr<DefNode*> DA : SA.Addr->members_if(DFG.IsDef, DFG)) {
-      RegisterRef DR = DA.Addr->getRegRef();
+      RegisterRef DR = DA.Addr->getRegRef(DFG);
       auto FR = EM.find(DR);
       if (FR == EM.end())
         continue;
@@ -198,7 +185,7 @@ bool CopyPropagation::run() {
         uint16_t F = UA.Addr->getFlags();
         if ((F & NodeAttrs::PhiRef) || (F & NodeAttrs::Fixed))
           continue;
-        if (UA.Addr->getRegRef() != DR)
+        if (UA.Addr->getRegRef(DFG) != DR)
           continue;
 
         NodeAddr<InstrNode*> IA = UA.Addr->getOwner(DFG);
@@ -215,10 +202,16 @@ bool CopyPropagation::run() {
                  << *NodeAddr<StmtNode*>(IA).Addr->getCode();
         }
 
-        Op.setReg(SR.Reg);
-        Op.setSubReg(SR.Sub);
+        unsigned NewReg = MinPhysReg(SR);
+        Op.setReg(NewReg);
+        Op.setSubReg(0);
         DFG.unlinkUse(UA, false);
-        UA.Addr->linkToDef(UA.Id, DFG.addr<DefNode*>(RDefSR_SA));
+        if (RDefSR_SA != 0) {
+          UA.Addr->linkToDef(UA.Id, DFG.addr<DefNode*>(RDefSR_SA));
+        } else {
+          UA.Addr->setReachingDef(0);
+          UA.Addr->setSibling(0);
+        }
 
         Changed = true;
   #ifndef NDEBUG

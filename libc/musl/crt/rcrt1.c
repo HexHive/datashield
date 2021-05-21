@@ -2,7 +2,7 @@
 #define _dlstart_c _start_c
 #include "../ldso/dlstart.c"
 
-int main();
+int main(int argc, const char *argv[]);
 void _init() __attribute__((weak));
 void _fini() __attribute__((weak));
 _Noreturn int __libc_start_main(int (*)(), int, char **,

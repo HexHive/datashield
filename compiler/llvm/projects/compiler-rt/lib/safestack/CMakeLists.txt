@@ -1,10 +1,14 @@
-add_custom_target(safestack)
+add_compiler_rt_component(safestack)
+add_compiler_rt_component(safestacksepseg)
 
 set(SAFESTACK_SOURCES safestack.cc)
+set(SAFESTACKMPX_SOURCES safestackmpx.cc)
 
 include_directories(..)
 
 set(SAFESTACK_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+# CPUID will be used to check for XSAVEC support at runtime
+set(SAFESTACKMPX_CFLAGS ${SANITIZER_COMMON_CFLAGS} -mxsavec)
 
 if(APPLE)
   # Build universal binary on APPLE.
@@ -31,4 +35,17 @@ else()
       CFLAGS ${SAFESTACK_CFLAGS}
       PARENT_TARGET safestack)
   endforeach()
+  add_compiler_rt_runtime(clang_rt.safestacksepseg
+    STATIC
+    ARCHS x86_64
+    # Build safestack sources into this library instead of linking both
+    # libraries, because RTSanitizerCommonNoLibc and RTSanitizerCommonLibc define
+    # some identical symbols.
+    SOURCES ${SAFESTACK_SOURCES}
+            ${SAFESTACKMPX_SOURCES}
+            $<TARGET_OBJECTS:RTInterception.x86_64>
+            $<TARGET_OBJECTS:RTSanitizerCommon.x86_64>
+            $<TARGET_OBJECTS:RTSanitizerCommonLibc.x86_64>
+    CFLAGS ${SAFESTACKMPX_CFLAGS}
+    PARENT_TARGET safestacksepseg)
 endif()

@@ -201,6 +201,7 @@ static StoreInst *findSafeStoreForStoreStrongContraction(LoadInst *Load,
 
   // Get the location associated with Load.
   MemoryLocation Loc = MemoryLocation::get(Load);
+  auto *LocPtr = Loc.Ptr->stripPointerCasts();
 
   // Walk down to find the store and the release, which may be in either order.
   for (auto I = std::next(BasicBlock::iterator(Load)),
@@ -261,7 +262,7 @@ static StoreInst *findSafeStoreForStoreStrongContraction(LoadInst *Load,
 
     // Then make sure that the pointer we are storing to is Ptr. If so, we
     // found our Store!
-    if (Store->getPointerOperand() == Loc.Ptr)
+    if (Store->getPointerOperand()->stripPointerCasts() == LocPtr)
       continue;
 
     // Otherwise, we have an unknown store to some other ptr that clobbers
@@ -422,7 +423,7 @@ bool ObjCARCContract::tryToPeepholeInstruction(
       if (!optimizeRetainCall(F, Inst))
         return false;
       // If we succeed in our optimization, fall through.
-      // FALLTHROUGH
+      LLVM_FALLTHROUGH;
     case ARCInstKind::RetainRV:
     case ARCInstKind::ClaimRV: {
       // If we're compiling for a target which needs a special inline-asm
@@ -436,7 +437,7 @@ bool ObjCARCContract::tryToPeepholeInstruction(
       // If it's an invoke, we have to cross a block boundary. And we have
       // to carefully dodge no-op instructions.
       do {
-        if (&*BBI == InstParent->begin()) {
+        if (BBI == InstParent->begin()) {
           BasicBlock *Pred = InstParent->getSinglePredecessor();
           if (!Pred)
             goto decline_rv_optimization;
@@ -546,13 +547,13 @@ bool ObjCARCContract::runOnFunction(Function &F) {
 
     // Don't use GetArgRCIdentityRoot because we don't want to look through bitcasts
     // and such; to do the replacement, the argument must have type i8*.
-    Value *Arg = cast<CallInst>(Inst)->getArgOperand(0);
 
-    // TODO: Change this to a do-while.
-    for (;;) {
+    // Function for replacing uses of Arg dominated by Inst.
+    auto ReplaceArgUses = [Inst, this](Value *Arg) {
       // If we're compiling bugpointed code, don't get in trouble.
       if (!isa<Instruction>(Arg) && !isa<Argument>(Arg))
-        break;
+        return;
+
       // Look through the uses of the pointer.
       for (Value::use_iterator UI = Arg->use_begin(), UE = Arg->use_end();
            UI != UE; ) {
@@ -597,6 +598,15 @@ bool ObjCARCContract::runOnFunction(Function &F) {
           }
         }
       }
+    };
+
+
+    Value *Arg = cast<CallInst>(Inst)->getArgOperand(0);
+    Value *OrigArg = Arg;
+
+    // TODO: Change this to a do-while.
+    for (;;) {
+      ReplaceArgUses(Arg);
 
       // If Arg is a no-op casted pointer, strip one level of casts and iterate.
       if (const BitCastInst *BI = dyn_cast<BitCastInst>(Arg))
@@ -605,10 +615,28 @@ bool ObjCARCContract::runOnFunction(Function &F) {
                cast<GEPOperator>(Arg)->hasAllZeroIndices())
         Arg = cast<GEPOperator>(Arg)->getPointerOperand();
       else if (isa<GlobalAlias>(Arg) &&
-               !cast<GlobalAlias>(Arg)->mayBeOverridden())
+               !cast<GlobalAlias>(Arg)->isInterposable())
         Arg = cast<GlobalAlias>(Arg)->getAliasee();
       else
         break;
+    }
+
+    // Replace bitcast users of Arg that are dominated by Inst.
+    SmallVector<BitCastInst *, 2> BitCastUsers;
+
+    // Add all bitcast users of the function argument first.
+    for (User *U : OrigArg->users())
+      if (auto *BC = dyn_cast<BitCastInst>(U))
+        BitCastUsers.push_back(BC);
+
+    // Replace the bitcasts with the call return. Iterate until list is empty.
+    while (!BitCastUsers.empty()) {
+      auto *BC = BitCastUsers.pop_back_val();
+      for (User *U : BC->users())
+        if (auto *B = dyn_cast<BitCastInst>(U))
+          BitCastUsers.push_back(B);
+
+      ReplaceArgUses(BC);
     }
   }
 

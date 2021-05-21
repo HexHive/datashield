@@ -95,7 +95,7 @@ def strip_doxygen(comment):
 def unify_arguments(args):
   """Gets rid of anything the user doesn't care about in the argument list."""
   args = re.sub(r'internal::', r'', args)
-  args = re.sub(r'const\s+', r'', args)
+  args = re.sub(r'const\s+(.*)&', r'\1 ', args)
   args = re.sub(r'&', r' ', args)
   args = re.sub(r'(^|\s)M\d?(\s)', r'\1Matcher<*>\2', args)
   return args
@@ -231,7 +231,7 @@ def act_on_decl(declaration, comment, allowed_types):
     m = re.match(r"""^\s*AST_MATCHER(_P)?(.?)(?:_OVERLOAD)?\(
                        (?:\s*([^\s,]+)\s*,)?
                           \s*([^\s,]+)\s*
-                       (?:,\s*([^\s,]+)\s*
+                       (?:,\s*([^,]+)\s*
                           ,\s*([^\s,]+)\s*)?
                        (?:,\s*([^\s,]+)\s*
                           ,\s*([^\s,]+)\s*)?
@@ -262,6 +262,16 @@ def act_on_decl(declaration, comment, allowed_types):
     if m:
       name = m.groups()[0]
       add_matcher('*', name, 'Matcher<*>', comment)
+      return
+
+    # Parse Variadic functions.
+    m = re.match(
+        r"""^.*internal::VariadicFunction\s*<\s*([^,]+),\s*([^,]+),\s*[^>]+>\s*
+              ([a-zA-Z]*)\s*=\s*{.*};$""",
+        declaration, flags=re.X)
+    if m:
+      result, arg, name = m.groups()[:3]
+      add_matcher(result, name, '%s, ..., %s' % (arg, arg), comment)
       return
 
     # Parse Variadic operator matchers.
@@ -363,11 +373,11 @@ traversal_matcher_table = sort_table('TRAVERSAL', traversal_matchers)
 
 reference = open('../LibASTMatchersReference.html').read()
 reference = re.sub(r'<!-- START_DECL_MATCHERS.*END_DECL_MATCHERS -->',
-                   '%s', reference, flags=re.S) % node_matcher_table
+                   node_matcher_table, reference, flags=re.S)
 reference = re.sub(r'<!-- START_NARROWING_MATCHERS.*END_NARROWING_MATCHERS -->',
-                   '%s', reference, flags=re.S) % narrowing_matcher_table
+                   narrowing_matcher_table, reference, flags=re.S)
 reference = re.sub(r'<!-- START_TRAVERSAL_MATCHERS.*END_TRAVERSAL_MATCHERS -->',
-                   '%s', reference, flags=re.S) % traversal_matcher_table
+                   traversal_matcher_table, reference, flags=re.S)
 
 with open('../LibASTMatchersReference.html', 'wb') as output:
   output.write(reference)

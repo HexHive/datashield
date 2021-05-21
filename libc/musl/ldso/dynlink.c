@@ -99,6 +99,9 @@ int __init_tp(void *);
 void __init_libc(char **, char *);
 void *__copy_tls(unsigned char *);
 
+void __preinit_unsafe_stack(void);
+void __init_unsafe_stack(void);
+
 __attribute__((__visibility__("hidden")))
 const char *__libc_get_version(void);
 
@@ -133,11 +136,12 @@ static struct fdpic_dummy_loadmap app_dummy_loadmap;
 struct debug *_dl_debug_addr = &debug;
 
 __attribute__((__visibility__("hidden")))
-void (*const __init_array_start)(void)=0, (*const __fini_array_start)(void)=0;
+void (*const __preinit_array_start)(void)=0, (*const __init_array_start)(void)=0, (*const __fini_array_start)(void)=0;
 
 __attribute__((__visibility__("hidden")))
-extern void (*const __init_array_end)(void), (*const __fini_array_end)(void);
+extern void (*const __preinit_array_end)(void), (*const __init_array_end)(void), (*const __fini_array_end)(void);
 
+weak_alias(__preinit_array_start, __preinit_array_end);
 weak_alias(__init_array_start, __init_array_end);
 weak_alias(__fini_array_start, __fini_array_end);
 
@@ -1223,6 +1227,11 @@ static void do_init_fini(struct dso *p)
 			p->fini_next = fini_head;
 			fini_head = p;
 		}
+		if (dyn[0] & (1<<DT_PREINIT_ARRAY)) {
+			size_t n = dyn[DT_PREINIT_ARRAYSZ]/sizeof(size_t);
+			size_t *fn = laddr(p, dyn[DT_PREINIT_ARRAY]);
+			while (n--) ((void (*)(void))*fn++)();
+		}
 #ifndef NO_LEGACY_INITFINI
 		if ((dyn[0] & (1<<DT_INIT)) && dyn[DT_INIT])
 			fpaddr(p, dyn[DT_INIT])();
@@ -1324,9 +1333,14 @@ static void update_tls_size()
  * linker itself, but some of the relocations performed may need to be
  * replaced later due to copy relocations in the main program. */
 
+#if SAFE_STACK
+__attribute__((no_sanitize("safe-stack")))
+#endif
 __attribute__((__visibility__("hidden")))
 void __dls2(unsigned char *base, size_t *sp)
 {
+	__preinit_unsafe_stack();
+
 	if (DL_FDPIC) {
 		void *p1 = (void *)sp[-2];
 		void *p2 = (void *)sp[-1];
@@ -1388,6 +1402,9 @@ void __dls2(unsigned char *base, size_t *sp)
  * process dependencies and relocations for the main application and
  * transfer control to its entry point. */
 
+#if SAFE_STACK
+__attribute__((no_sanitize("safe-stack")))
+#endif
 _Noreturn void __dls3(size_t *sp)
 {
 	static struct dso app, vdso;
@@ -1419,6 +1436,8 @@ _Noreturn void __dls3(size_t *sp)
 	if (__init_tp(__copy_tls((void *)builtin_tls)) < 0) {
 		a_crash();
 	}
+
+	__init_unsafe_stack();
 
 	/* Only trust user/env if kernel says we're not suid/sgid */
 	if (!libc.secure) {

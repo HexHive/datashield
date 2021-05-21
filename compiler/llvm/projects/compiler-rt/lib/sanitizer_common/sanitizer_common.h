@@ -23,7 +23,7 @@
 #include "sanitizer_list.h"
 #include "sanitizer_mutex.h"
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 extern "C" void _ReadWriteBarrier();
 #pragma intrinsic(_ReadWriteBarrier)
 #endif
@@ -44,9 +44,6 @@ const uptr kWordSizeInBits = 8 * kWordSize;
 
 const uptr kMaxPathLength = 4096;
 
-// 16K loaded modules should be enough for everyone.
-static const uptr kMaxNumberOfModules = 1 << 14;
-
 const uptr kMaxThreadStackSize = 1 << 30;  // 1Gb
 
 static const uptr kErrorMessageBufferSize = 1 << 16;
@@ -66,7 +63,12 @@ INLINE int Verbosity() {
 }
 
 uptr GetPageSize();
-uptr GetPageSizeCached();
+extern uptr PageSizeCached;
+INLINE uptr GetPageSizeCached() {
+  if (!PageSizeCached)
+    PageSizeCached = GetPageSize();
+  return PageSizeCached;
+}
 uptr GetMmapGranularity();
 uptr GetMaxVirtualAddress();
 // Threads
@@ -87,17 +89,24 @@ void *MmapFixedNoReserve(uptr fixed_addr, uptr size,
                          const char *name = nullptr);
 void *MmapNoReserveOrDie(uptr size, const char *mem_type);
 void *MmapFixedOrDie(uptr fixed_addr, uptr size);
-void *MmapNoAccess(uptr fixed_addr, uptr size, const char *name = nullptr);
+void *MmapFixedNoAccess(uptr fixed_addr, uptr size, const char *name = nullptr);
+void *MmapNoAccess(uptr size);
 // Map aligned chunk of address space; size and alignment are powers of two.
 void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type);
-// Disallow access to a memory range.  Use MmapNoAccess to allocate an
+// Disallow access to a memory range.  Use MmapFixedNoAccess to allocate an
 // unaccessible memory.
 bool MprotectNoAccess(uptr addr, uptr size);
 bool MprotectReadOnly(uptr addr, uptr size);
+bool MprotectReadWrite(uptr addr, uptr size);
+
+// Find an available address space.
+uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding);
 
 // Used to check if we can map shadow memory to a fixed location.
 bool MemoryRangeIsAvailable(uptr range_start, uptr range_end);
-void FlushUnneededShadowMemory(uptr addr, uptr size);
+// Releases memory pages entirely within the [beg, end] address range. Noop if
+// the provided range does not contain at least one entire page.
+void ReleaseMemoryPagesToOS(uptr beg, uptr end);
 void IncreaseTotalMmap(uptr size);
 void DecreaseTotalMmap(uptr size);
 uptr GetRSS();
@@ -105,21 +114,21 @@ void NoHugePagesInRegion(uptr addr, uptr length);
 void DontDumpShadowMemory(uptr addr, uptr length);
 // Check if the built VMA size matches the runtime one.
 void CheckVMASize();
+void RunMallocHooks(const void *ptr, uptr size);
+void RunFreeHooks(const void *ptr);
 
 // InternalScopedBuffer can be used instead of large stack arrays to
 // keep frame size low.
 // FIXME: use InternalAlloc instead of MmapOrDie once
 // InternalAlloc is made libc-free.
-template<typename T>
+template <typename T>
 class InternalScopedBuffer {
  public:
   explicit InternalScopedBuffer(uptr cnt) {
     cnt_ = cnt;
-    ptr_ = (T*)MmapOrDie(cnt * sizeof(T), "InternalScopedBuffer");
+    ptr_ = (T *)MmapOrDie(cnt * sizeof(T), "InternalScopedBuffer");
   }
-  ~InternalScopedBuffer() {
-    UnmapOrDie(ptr_, cnt_ * sizeof(T));
-  }
+  ~InternalScopedBuffer() { UnmapOrDie(ptr_, cnt_ * sizeof(T)); }
   T &operator[](uptr i) { return ptr_[i]; }
   T *data() { return ptr_; }
   uptr size() { return cnt_ * sizeof(T); }
@@ -127,9 +136,11 @@ class InternalScopedBuffer {
  private:
   T *ptr_;
   uptr cnt_;
-  // Disallow evil constructors.
-  InternalScopedBuffer(const InternalScopedBuffer&);
-  void operator=(const InternalScopedBuffer&);
+  // Disallow copies and moves.
+  InternalScopedBuffer(const InternalScopedBuffer &) = delete;
+  InternalScopedBuffer &operator=(const InternalScopedBuffer &) = delete;
+  InternalScopedBuffer(InternalScopedBuffer &&) = delete;
+  InternalScopedBuffer &operator=(InternalScopedBuffer &&) = delete;
 };
 
 class InternalScopedString : public InternalScopedBuffer<char> {
@@ -273,6 +284,7 @@ void UpdateProcessName();
 void CacheBinaryName();
 void DisableCoreDumperIfNecessary();
 void DumpProcessMap();
+void PrintModuleMap();
 bool FileExists(const char *filename);
 const char *GetEnv(const char *name);
 bool SetEnv(const char *name, const char *value);
@@ -300,6 +312,7 @@ void ReExec();
 char **GetArgv();
 void PrintCmdline();
 bool StackSizeIsUnlimited();
+uptr GetStackSizeLimitInBytes();
 void SetStackSizeLimitInBytes(uptr limit);
 bool AddressSpaceIsUnlimited();
 void SetAddressSpaceUnlimited();
@@ -324,6 +337,7 @@ void SleepForMillis(int millis);
 u64 NanoTime();
 int Atexit(void (*function)(void));
 void SortArray(uptr *array, uptr size);
+void SortArray(u32 *array, uptr size);
 bool TemplateMatch(const char *templ, const char *str);
 
 // Exit
@@ -383,7 +397,7 @@ void ReportErrorSummary(const char *error_message);
 //   error_type file:line[:column][ function]
 void ReportErrorSummary(const char *error_type, const AddressInfo &info);
 // Same as above, but obtains AddressInfo by symbolizing top stack trace frame.
-void ReportErrorSummary(const char *error_type, StackTrace *trace);
+void ReportErrorSummary(const char *error_type, const StackTrace *trace);
 
 // Math
 #if SANITIZER_WINDOWS && !defined(__clang__) && !defined(__GNUC__)
@@ -440,8 +454,8 @@ INLINE uptr RoundUpToPowerOfTwo(uptr size) {
   if (IsPowerOfTwo(size)) return size;
 
   uptr up = MostSignificantSetBitIndex(size);
-  CHECK(size < (1ULL << (up + 1)));
-  CHECK(size > (1ULL << up));
+  CHECK_LT(size, (1ULL << (up + 1)));
+  CHECK_GT(size, (1ULL << up));
   return 1ULL << (up + 1);
 }
 
@@ -513,7 +527,7 @@ class InternalMmapVectorNoCtor {
       uptr new_capacity = RoundUpToPowerOfTwo(size_ + 1);
       Resize(new_capacity);
     }
-    data_[size_++] = element;
+    internal_memcpy(&data_[size_++], &element, sizeof(T));
   }
   T &back() {
     CHECK_GT(size_, 0);
@@ -534,6 +548,13 @@ class InternalMmapVectorNoCtor {
   }
   uptr capacity() const {
     return capacity_;
+  }
+  void resize(uptr new_size) {
+    Resize(new_size);
+    if (new_size > size_) {
+      internal_memset(&data_[size_], 0, sizeof(T) * (new_size - size_));
+    }
+    size_ = new_size;
   }
 
   void clear() { size_ = 0; }
@@ -619,34 +640,87 @@ void InternalSort(Container *v, uptr size, Compare comp) {
   }
 }
 
-template<class Container, class Value, class Compare>
-uptr InternalBinarySearch(const Container &v, uptr first, uptr last,
-                          const Value &val, Compare comp) {
-  uptr not_found = last + 1;
-  while (last >= first) {
+// Works like std::lower_bound: finds the first element that is not less
+// than the val.
+template <class Container, class Value, class Compare>
+uptr InternalLowerBound(const Container &v, uptr first, uptr last,
+                        const Value &val, Compare comp) {
+  while (last > first) {
     uptr mid = (first + last) / 2;
     if (comp(v[mid], val))
       first = mid + 1;
-    else if (comp(val, v[mid]))
-      last = mid - 1;
     else
-      return mid;
+      last = mid;
   }
-  return not_found;
+  return first;
 }
+
+enum ModuleArch {
+  kModuleArchUnknown,
+  kModuleArchI386,
+  kModuleArchX86_64,
+  kModuleArchX86_64H,
+  kModuleArchARMV6,
+  kModuleArchARMV7,
+  kModuleArchARMV7S,
+  kModuleArchARMV7K,
+  kModuleArchARM64
+};
+
+// When adding a new architecture, don't forget to also update
+// script/asan_symbolize.py and sanitizer_symbolizer_libcdep.cc.
+inline const char *ModuleArchToString(ModuleArch arch) {
+  switch (arch) {
+    case kModuleArchUnknown:
+      return "";
+    case kModuleArchI386:
+      return "i386";
+    case kModuleArchX86_64:
+      return "x86_64";
+    case kModuleArchX86_64H:
+      return "x86_64h";
+    case kModuleArchARMV6:
+      return "armv6";
+    case kModuleArchARMV7:
+      return "armv7";
+    case kModuleArchARMV7S:
+      return "armv7s";
+    case kModuleArchARMV7K:
+      return "armv7k";
+    case kModuleArchARM64:
+      return "arm64";
+  }
+  CHECK(0 && "Invalid module arch");
+}
+
+const uptr kModuleUUIDSize = 16;
 
 // Represents a binary loaded into virtual memory (e.g. this can be an
 // executable or a shared object).
 class LoadedModule {
  public:
-  LoadedModule() : full_name_(nullptr), base_address_(0) { ranges_.clear(); }
+  LoadedModule()
+      : full_name_(nullptr),
+        base_address_(0),
+        max_executable_address_(0),
+        arch_(kModuleArchUnknown),
+        instrumented_(false) {
+    internal_memset(uuid_, 0, kModuleUUIDSize);
+    ranges_.clear();
+  }
   void set(const char *module_name, uptr base_address);
+  void set(const char *module_name, uptr base_address, ModuleArch arch,
+           u8 uuid[kModuleUUIDSize], bool instrumented);
   void clear();
   void addAddressRange(uptr beg, uptr end, bool executable);
   bool containsAddress(uptr address) const;
 
   const char *full_name() const { return full_name_; }
   uptr base_address() const { return base_address_; }
+  uptr max_executable_address() const { return max_executable_address_; }
+  ModuleArch arch() const { return arch_; }
+  const u8 *uuid() const { return uuid_; }
+  bool instrumented() const { return instrumented_; }
 
   struct AddressRange {
     AddressRange *next;
@@ -663,16 +737,40 @@ class LoadedModule {
  private:
   char *full_name_;  // Owned.
   uptr base_address_;
+  uptr max_executable_address_;
+  ModuleArch arch_;
+  u8 uuid_[kModuleUUIDSize];
+  bool instrumented_;
   IntrusiveList<AddressRange> ranges_;
 };
 
-// OS-dependent function that fills array with descriptions of at most
-// "max_modules" currently loaded modules. Returns the number of
-// initialized modules. If filter is nonzero, ignores modules for which
-// filter(full_name) is false.
-typedef bool (*string_predicate_t)(const char *);
-uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
-                      string_predicate_t filter);
+// List of LoadedModules. OS-dependent implementation is responsible for
+// filling this information.
+class ListOfModules {
+ public:
+  ListOfModules() : modules_(kInitialCapacity) {}
+  ~ListOfModules() { clear(); }
+  void init();
+  const LoadedModule *begin() const { return modules_.begin(); }
+  LoadedModule *begin() { return modules_.begin(); }
+  const LoadedModule *end() const { return modules_.end(); }
+  LoadedModule *end() { return modules_.end(); }
+  uptr size() const { return modules_.size(); }
+  const LoadedModule &operator[](uptr i) const {
+    CHECK_LT(i, modules_.size());
+    return modules_[i];
+  }
+
+ private:
+  void clear() {
+    for (auto &module : modules_) module.clear();
+    modules_.clear();
+  }
+
+  InternalMmapVector<LoadedModule> modules_;
+  // We rarely have more than 16K loaded modules.
+  static const uptr kInitialCapacity = 1 << 14;
+};
 
 // Callback type for iterating over a set of memory ranges.
 typedef void (*RangeIteratorCallback)(uptr begin, uptr end, void *arg);
@@ -736,7 +834,7 @@ void MaybeStartBackgroudThread();
 // compiler from recognising it and turning it into an actual call to
 // memset/memcpy/etc.
 static inline void SanitizerBreakOptimization(void *arg) {
-#if _MSC_VER && !defined(__clang__)
+#if defined(_MSC_VER) && !defined(__clang__)
   _ReadWriteBarrier();
 #else
   __asm__ __volatile__("" : : "r" (arg) : "memory");
@@ -763,6 +861,8 @@ struct SignalContext {
         is_memory_access(is_memory_access),
         write_flag(write_flag) {}
 
+  static void DumpAllRegisters(void *context);
+
   // Creates signal context in a platform-specific manner.
   static SignalContext Create(void *siginfo, void *context);
 
@@ -772,7 +872,6 @@ struct SignalContext {
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp);
 
-void DisableReexec();
 void MaybeReexec();
 
 template <typename Fn>
@@ -792,16 +891,30 @@ RunOnDestruction<Fn> at_scope_exit(Fn fn) {
   return RunOnDestruction<Fn>(fn);
 }
 
+// Linux on 64-bit s390 had a nasty bug that crashes the whole machine
+// if a process uses virtual memory over 4TB (as many sanitizers like
+// to do).  This function will abort the process if running on a kernel
+// that looks vulnerable.
+#if SANITIZER_LINUX && SANITIZER_S390_64
+void AvoidCVE_2016_2143();
+#else
+INLINE void AvoidCVE_2016_2143() {}
+#endif
+
+struct StackDepotStats {
+  uptr n_uniq_ids;
+  uptr allocated;
+};
+
+// The default value for allocator_release_to_os_interval_ms common flag to
+// indicate that sanitizer allocator should not attempt to release memory to OS.
+const s32 kReleaseToOSIntervalNever = -1;
+
 }  // namespace __sanitizer
 
 inline void *operator new(__sanitizer::operator_new_size_type size,
                           __sanitizer::LowLevelAllocator &alloc) {
   return alloc.Allocate(size);
 }
-
-struct StackDepotStats {
-  uptr n_uniq_ids;
-  uptr allocated;
-};
 
 #endif  // SANITIZER_COMMON_H

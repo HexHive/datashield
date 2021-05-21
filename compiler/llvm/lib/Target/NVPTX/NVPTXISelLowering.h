@@ -34,7 +34,9 @@ enum NodeType : unsigned {
   DeclareRet,
   DeclareScalarRet,
   PrintCall,
+  PrintConvergentCall,
   PrintCallUni,
+  PrintConvergentCallUni,
   CallArgBegin,
   CallArg,
   LastCallArg,
@@ -475,10 +477,11 @@ public:
   getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
                                StringRef Constraint, MVT VT) const override;
 
-  SDValue LowerFormalArguments(
-      SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
-      const SmallVectorImpl<ISD::InputArg> &Ins, SDLoc dl, SelectionDAG &DAG,
-      SmallVectorImpl<SDValue> &InVals) const override;
+  SDValue LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv,
+                               bool isVarArg,
+                               const SmallVectorImpl<ISD::InputArg> &Ins,
+                               const SDLoc &dl, SelectionDAG &DAG,
+                               SmallVectorImpl<SDValue> &InVals) const override;
 
   SDValue LowerCall(CallLoweringInfo &CLI,
                     SmallVectorImpl<SDValue> &InVals) const override;
@@ -488,11 +491,10 @@ public:
                            unsigned retAlignment,
                            const ImmutableCallSite *CS) const;
 
-  SDValue
-  LowerReturn(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
-              const SmallVectorImpl<ISD::OutputArg> &Outs,
-              const SmallVectorImpl<SDValue> &OutVals, SDLoc dl,
-              SelectionDAG &DAG) const override;
+  SDValue LowerReturn(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
+                      const SmallVectorImpl<ISD::OutputArg> &Outs,
+                      const SmallVectorImpl<SDValue> &OutVals, const SDLoc &dl,
+                      SelectionDAG &DAG) const override;
 
   void LowerAsmOperandForConstraint(SDValue Op, std::string &Constraint,
                                     std::vector<SDValue> &Ops,
@@ -509,6 +511,7 @@ public:
   getPreferredVectorAction(EVT VT) const override;
 
   bool allowFMA(MachineFunction &MF, CodeGenOpt::Level OptLevel) const;
+  bool allowUnsafeFPMath(MachineFunction &MF) const;
 
   bool isFMAFasterThanFMulAndFAdd(EVT) const override { return true; }
 
@@ -525,6 +528,7 @@ private:
 
   SDValue LowerSTORE(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSTOREi1(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSTOREf16(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSTOREVector(SDValue Op, SelectionDAG &DAG) const;
 
   SDValue LowerShiftRightParts(SDValue Op, SelectionDAG &DAG) const;
@@ -537,7 +541,8 @@ private:
   SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
 
   unsigned getArgumentAlignment(SDValue Callee, const ImmutableCallSite *CS,
-                                Type *Ty, unsigned Idx) const;
+                                Type *Ty, unsigned Idx,
+                                const DataLayout &DL) const;
 };
 } // namespace llvm
 

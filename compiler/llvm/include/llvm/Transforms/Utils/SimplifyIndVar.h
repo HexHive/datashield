@@ -17,13 +17,11 @@
 #define LLVM_TRANSFORMS_UTILS_SIMPLIFYINDVAR_H
 
 #include "llvm/IR/ValueHandle.h"
-#include "llvm/Support/CommandLine.h"
 
 namespace llvm {
 
 class CastInst;
 class DominatorTree;
-class IVUsers;
 class Loop;
 class LoopInfo;
 class PHINode;
@@ -33,25 +31,15 @@ class ScalarEvolution;
 /// simplified by this utility.
 class IVVisitor {
 protected:
-  const DominatorTree *DT;
-  bool ShouldSplitOverflowIntrinsics;
+  const DominatorTree *DT = nullptr;
 
   virtual void anchor();
 
 public:
-  IVVisitor(): DT(nullptr), ShouldSplitOverflowIntrinsics(false) {}
-  virtual ~IVVisitor() {}
+  IVVisitor() = default;
+  virtual ~IVVisitor() = default;
 
   const DominatorTree *getDomTree() const { return DT; }
-
-  bool shouldSplitOverflowInstrinsics() const {
-    return ShouldSplitOverflowIntrinsics;
-  }
-  void setSplitOverflowIntrinsics() {
-    ShouldSplitOverflowIntrinsics = true;
-    assert(DT && "Splitting overflow intrinsics requires a DomTree.");
-  }
-
   virtual void visitCast(CastInst *Cast) = 0;
 };
 
@@ -66,6 +54,6 @@ bool simplifyUsersOfIV(PHINode *CurrIV, ScalarEvolution *SE, DominatorTree *DT,
 bool simplifyLoopIVs(Loop *L, ScalarEvolution *SE, DominatorTree *DT,
                      LoopInfo *LI, SmallVectorImpl<WeakVH> &Dead);
 
-} // namespace llvm
+} // end namespace llvm
 
-#endif
+#endif // LLVM_TRANSFORMS_UTILS_SIMPLIFYINDVAR_H

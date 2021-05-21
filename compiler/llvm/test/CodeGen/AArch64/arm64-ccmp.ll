@@ -1,4 +1,4 @@
-; RUN: llc < %s -mcpu=cyclone -verify-machineinstrs -aarch64-ccmp -aarch64-stress-ccmp | FileCheck %s
+; RUN: llc < %s -mcpu=cyclone -verify-machineinstrs -aarch64-enable-ccmp -aarch64-stress-ccmp | FileCheck %s
 target triple = "arm64-apple-ios"
 
 ; CHECK: single_same
@@ -371,76 +371,21 @@ define i32 @select_andor(i32 %v1, i32 %v2, i32 %v3) {
   ret i32 %sel
 }
 
-; CHECK-LABEL: single_noselect
-define i32 @single_noselect(i32 %A, i32 %B) #0 {
-; CHECK: cmp w1, #1
-; CHECK-NEXT: ccmp w0, #1, #8, ge
-; CHECK-NEXT: cset w0, lt
-; CHECK-NEXT: ret
-  %notlhs = icmp slt i32 %A, 1
-  %notrhs = icmp slt i32 %B, 1
-  %lnot = or i1 %notlhs, %notrhs
-  %conv = zext i1 %lnot to i32
-  ret i32 %conv
-}
-
-; CHECK-LABEL: single_and_ext
-define i32 @single_and_ext(i32 %A, i32 %B, i32 %C) #0 {
-; CHECK: cmp w1, #2
-; CHECK-NEXT: ccmp w0, #4, #0, lt
-; CHECK-NEXT: cinc w0, w2, lt
-; CHECK-NEXT: ret
-  %cmp = icmp slt i32 %A, 4
-  %cmp1 = icmp slt i32 %B, 2
-  %and1 = and i1 %cmp, %cmp1
-  %conv = zext i1 %and1 to i32
-  %add = add nsw i32 %conv, %C
-  ret i32 %add
-}
-
-; CHECK-LABEL: single_noselect_phi
-define i32 @single_noselect_phi(i32 %A, i32 %B, i32 %C) #0 {
-; CHECK: cmp w1, #0
-; CHECK-NEXT: ccmp w0, #0, #4, gt
-; CHECK-NEXT: cset [[REG1:w[0-9]+]], gt
-; CHECK-NEXT: cmp w1, #2
-; CHECK-NEXT: ccmp w0, #4, #8, ge
-; CHECK-NEXT: cset [[REG2:w[0-9]+]], lt
-; CHECK-NEXT: cmp w2, #0
-; CHECK-NEXT: csel w0, [[REG1]], [[REG2]], eq
-; CHECK-NEXT: ret
-entry:
-  %tobool = icmp eq i32 %C, 0
-  br i1 %tobool, label %if.else, label %if.then
-
-if.then:                                          ; preds = %entry
-  %cmp = icmp slt i32 %A, 4
-  %cmp1 = icmp slt i32 %B, 2
-  %0 = or i1 %cmp, %cmp1
-  br label %if.end
-
-if.else:                                          ; preds = %entry
-  %cmp2 = icmp sgt i32 %A, 0
-  %cmp3 = icmp sgt i32 %B, 0
-  %1 = and i1 %cmp2, %cmp3
-  br label %if.end
-
-if.end:                                           ; preds = %if.else, %if.then
-  %b.0.in = phi i1 [ %0, %if.then ], [ %1, %if.else ]
-  %conv = zext i1 %b.0.in to i32
-  ret i32 %conv
-}
-
 ; CHECK-LABEL: select_noccmp1
 define i64 @select_noccmp1(i64 %v1, i64 %v2, i64 %v3, i64 %r) {
-; CHECK: cmp x0, #13
-; CHECK-NEXT: ccmp x0, #0, #0, gt
-; CHECK-NEXT: cset [[REG1:w[0-9]+]], lt
-; CHECK-NEXT: cmp x2, #4
-; CHECK-NEXT: ccmp x2, #2, #0, gt
+; CHECK: cmp x0, #0
+; CHECK-NEXT: cset [[REG0:w[0-9]+]], lt
+; CHECK-NEXT: cmp x0, #13
+; CHECK-NOT: ccmp
+; CHECK-NEXT: cset [[REG1:w[0-9]+]], gt
+; CHECK-NEXT: cmp x2, #2
 ; CHECK-NEXT: cset [[REG2:w[0-9]+]], lt
-; CHECK-NEXT: orr [[REG3:w[0-9]+]], [[REG1]], [[REG2]]
-; CHECK-NEXT: cmp [[REG3]], #0
+; CHECK-NEXT: cmp x2, #4
+; CHECK-NEXT: cset [[REG3:w[0-9]+]], gt
+; CHECK-NEXT: and [[REG4:w[0-9]+]], [[REG0]], [[REG1]]
+; CHECK-NEXT: and [[REG5:w[0-9]+]], [[REG2]], [[REG3]]
+; CHECK-NEXT: orr [[REG6:w[0-9]+]], [[REG4]], [[REG5]]
+; CHECK-NEXT: cmp [[REG6]], #0
 ; CHECK-NEXT: csel x0, xzr, x3, ne
 ; CHECK-NEXT: ret
   %c0 = icmp slt i64 %v1, 0
@@ -654,6 +599,58 @@ define i32 @select_or_olt_ueq_ogt(double %v0, double %v1, double %v2, double %v3
   %c2 = fcmp ogt double %v4, %v5
   %c3 = or i1 %c1, %c0
   %cr = or i1 %c2, %c3
+  %sel = select i1 %cr, i32 %a, i32 %b
+  ret i32 %sel
+}
+
+; Verify that we correctly promote f16.
+
+; CHECK-LABEL: half_select_and_olt_oge:
+; CHECK-LABEL: ; BB#0:
+; CHECK-DAG:  fcvt [[S0:s[0-9]+]], h0
+; CHECK-DAG:  fcvt [[S1:s[0-9]+]], h1
+; CHECK-NEXT: fcmp [[S0]], [[S1]]
+; CHECK-DAG:  fcvt [[S2:s[0-9]+]], h2
+; CHECK-DAG:  fcvt [[S3:s[0-9]+]], h3
+; CHECK-NEXT: fccmp [[S2]], [[S3]], #8, mi
+; CHECK-NEXT: csel w0, w0, w1, ge
+; CHECK-NEXT: ret
+define i32 @half_select_and_olt_oge(half %v0, half %v1, half %v2, half %v3, i32 %a, i32 %b) #0 {
+  %c0 = fcmp olt half %v0, %v1
+  %c1 = fcmp oge half %v2, %v3
+  %cr = and i1 %c1, %c0
+  %sel = select i1 %cr, i32 %a, i32 %b
+  ret i32 %sel
+}
+
+; CHECK-LABEL: half_select_and_olt_one:
+; CHECK-LABEL: ; BB#0:
+; CHECK-DAG:  fcvt [[S0:s[0-9]+]], h0
+; CHECK-DAG:  fcvt [[S1:s[0-9]+]], h1
+; CHECK-NEXT: fcmp [[S0]], [[S1]]
+; CHECK-DAG:  fcvt [[S2:s[0-9]+]], h2
+; CHECK-DAG:  fcvt [[S3:s[0-9]+]], h3
+; CHECK-NEXT: fccmp [[S2]], [[S3]], #4, mi
+; CHECK-NEXT: fccmp [[S2]], [[S3]], #1, ne
+; CHECK-NEXT: csel w0, w0, w1, vc
+; CHECK-NEXT: ret
+define i32 @half_select_and_olt_one(half %v0, half %v1, half %v2, half %v3, i32 %a, i32 %b) #0 {
+  %c0 = fcmp olt half %v0, %v1
+  %c1 = fcmp one half %v2, %v3
+  %cr = and i1 %c1, %c0
+  %sel = select i1 %cr, i32 %a, i32 %b
+  ret i32 %sel
+}
+
+; Also verify that we don't try to generate f128 FCCMPs, using RT calls instead.
+
+; CHECK-LABEL: f128_select_and_olt_oge:
+; CHECK: bl ___lttf2
+; CHECK: bl ___getf2
+define i32 @f128_select_and_olt_oge(fp128 %v0, fp128 %v1, fp128 %v2, fp128 %v3, i32 %a, i32 %b) #0 {
+  %c0 = fcmp olt fp128 %v0, %v1
+  %c1 = fcmp oge fp128 %v2, %v3
+  %cr = and i1 %c1, %c0
   %sel = select i1 %cr, i32 %a, i32 %b
   ret i32 %sel
 }

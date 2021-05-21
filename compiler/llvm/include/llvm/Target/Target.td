@@ -141,7 +141,10 @@ class RegisterWithSubRegs<string n, list<Register> subregs> : Register<n> {
 // of Operand's that are legal as type qualifiers in DAG patterns.  This should
 // only ever be used for defining multiclasses that are polymorphic over both
 // RegisterClass's and other Operand's.
-class DAGOperand { }
+class DAGOperand {
+  string OperandNamespace = "MCOI";
+  string DecoderMethod = "";
+}
 
 // RegisterClass - Now that all of the registers are defined, and aliases
 // between registers are defined, specify which registers belong to which
@@ -368,6 +371,7 @@ class Instruction {
   bit isSelect     = 0;     // Is this instruction a select instruction?
   bit isBarrier    = 0;     // Can control flow fall through this instruction?
   bit isCall       = 0;     // Is this instruction a call instruction?
+  bit isAdd        = 0;     // Is this instruction an add instruction?
   bit canFoldAsLoad = 0;    // Can this be folded as a simple memory operand?
   bit mayLoad      = ?;     // Is it possible for this inst to read memory?
   bit mayStore     = ?;     // Is it possible for this inst to write memory?
@@ -427,6 +431,11 @@ class Instruction {
   // Is this instruction a pseudo instruction for use by the assembler parser.
   bit isAsmParserOnly = 0;
 
+  // This instruction is not expected to be queried for scheduling latencies
+  // and therefore needs no scheduling information even for a complete
+  // scheduling model.
+  bit hasNoSchedulingInfo = 0;
+
   InstrItinClass Itinerary = NoItinerary;// Execution steps used for scheduling.
 
   // Scheduling information from TargetSchedule.td.
@@ -479,6 +488,12 @@ class Instruction {
   /// as "add r3, r5". The constraint is of the same form as a tied-operand
   /// constraint. For example, "$Rn = $Rd".
   string TwoOperandAliasConstraint = "";
+
+  /// Assembler variant name to use for this instruction. If specified then
+  /// instruction will be presented only in MatchTable for this variant. If
+  /// not specified then assembler variants will be determined based on
+  /// AsmString
+  string AsmVariantName = "";
 
   ///@}
 
@@ -614,6 +629,13 @@ class AsmOperandClass {
   ///
   /// Optional arguments must be at the end of the operand list.
   bit IsOptional = 0;
+
+  /// The name of the method on the target specific asm parser that returns the
+  /// default operand for this optional operand. This method is only used if
+  /// IsOptional == 1. If not set, this will default to "defaultFooOperands",
+  /// where Foo is the AsmOperandClass name. The method signature should be:
+  ///   std::unique_ptr<MCParsedAsmOperand> defaultFooOperands() const;
+  string DefaultMethod = ?;
 }
 
 def ImmAsmOperand : AsmOperandClass {
@@ -627,9 +649,7 @@ class Operand<ValueType ty> : DAGOperand {
   ValueType Type = ty;
   string PrintMethod = "printOperand";
   string EncoderMethod = "";
-  string DecoderMethod = "";
   bit hasCompleteDecoder = 1;
-  string OperandNamespace = "MCOI";
   string OperandType = "OPERAND_UNKNOWN";
   dag MIOperandInfo = (ops);
 
@@ -667,7 +687,6 @@ class RegisterOperand<RegisterClass regclass, string pm = "printOperand">
   // should declare the other operand as one of its super classes.
   AsmOperandClass ParserMatchClass;
 
-  string OperandNamespace = "MCOI";
   string OperandType = "OPERAND_REGISTER";
 }
 
@@ -681,6 +700,20 @@ def i64imm : Operand<i64>;
 def f32imm : Operand<f32>;
 def f64imm : Operand<f64>;
 }
+
+// Register operands for generic instructions don't have an MVT, but do have
+// constraints linking the operands (e.g. all operands of a G_ADD must
+// have the same LLT).
+class TypedOperand<string Ty> : Operand<untyped> {
+  let OperandType = Ty;
+}
+
+def type0 : TypedOperand<"OPERAND_GENERIC_0">;
+def type1 : TypedOperand<"OPERAND_GENERIC_1">;
+def type2 : TypedOperand<"OPERAND_GENERIC_2">;
+def type3 : TypedOperand<"OPERAND_GENERIC_3">;
+def type4 : TypedOperand<"OPERAND_GENERIC_4">;
+def type5 : TypedOperand<"OPERAND_GENERIC_5">;
 
 /// zero_reg definition - Special node to stand for the zero register.
 ///
@@ -765,9 +798,10 @@ class InstrInfo {
 // Standard Pseudo Instructions.
 // This list must match TargetOpcodes.h and CodeGenTarget.cpp.
 // Only these instructions are allowed in the TargetOpcode namespace.
-let isCodeGenOnly = 1, isPseudo = 1, Namespace = "TargetOpcode" in {
+let isCodeGenOnly = 1, isPseudo = 1, hasNoSchedulingInfo = 1,
+    Namespace = "TargetOpcode" in {
 def PHI : Instruction {
-  let OutOperandList = (outs);
+  let OutOperandList = (outs unknown:$dst);
   let InOperandList = (ins variable_ops);
   let AsmString = "PHINODE";
 }
@@ -857,6 +891,7 @@ def COPY : Instruction {
   let AsmString = "";
   let hasSideEffects = 0;
   let isAsCheapAsAMove = 1;
+  let hasNoSchedulingInfo = 0;
 }
 def BUNDLE : Instruction {
   let OutOperandList = (outs);
@@ -921,6 +956,47 @@ def FAULTING_LOAD_OP : Instruction {
   let InOperandList = (ins variable_ops);
   let usesCustomInserter = 1;
   let mayLoad = 1;
+  let isTerminator = 1;
+  let isBranch = 1;
+}
+def PATCHABLE_OP : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins variable_ops);
+  let usesCustomInserter = 1;
+  let mayLoad = 1;
+  let mayStore = 1;
+  let hasSideEffects = 1;
+}
+def PATCHABLE_FUNCTION_ENTER : Instruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins);
+  let AsmString = "# XRay Function Enter.";
+  let usesCustomInserter = 1;
+  let hasSideEffects = 0;
+}
+def PATCHABLE_RET : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins variable_ops);
+  let AsmString = "# XRay Function Patchable RET.";
+  let usesCustomInserter = 1;
+  let hasSideEffects = 1;
+  let isReturn = 1;
+}
+def PATCHABLE_FUNCTION_EXIT : Instruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins);
+  let AsmString = "# XRay Function Exit.";
+  let usesCustomInserter = 1;
+  let hasSideEffects = 0; // FIXME: is this correct?
+  let isReturn = 0; // Original return instruction will follow
+}
+def PATCHABLE_TAIL_CALL : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins variable_ops);
+  let AsmString = "# XRay Tail Call Exit.";
+  let usesCustomInserter = 1;
+  let hasSideEffects = 1;
+  let isReturn = 1;
 }
 
 // Generic opcodes used in GlobalISel.
@@ -1079,6 +1155,10 @@ class InstAlias<string Asm, dag Result, int Emit = 1> {
   // defined AsmMatchConverter and instead use the function generated by the
   // dag Result.
   bit UseInstAsmMatchConverter = 1;
+
+  // Assembler variant name to use for this alias. If not specified then
+  // assembler variants will be determined based on AsmString
+  string AsmVariantName = "";
 }
 
 //===----------------------------------------------------------------------===//
@@ -1260,3 +1340,8 @@ include "llvm/Target/TargetCallingConv.td"
 // Pull in the common support for DAG isel generation.
 //
 include "llvm/Target/TargetSelectionDAG.td"
+
+//===----------------------------------------------------------------------===//
+// Pull in the common support for Global ISel generation.
+//
+include "llvm/Target/TargetGlobalISel.td"

@@ -36,9 +36,13 @@ def get_clang_command(build_type, cmdLineArgs, linker_args, cxx=False):
       args.append("-isystem")
       args.append(os.path.join(DS_SYSROOT, "include", "c++", "v1"))
     args.append("-isystem")
-    args.append(os.path.join(DS_SYSROOT, "lib", "clang", "3.9.0", "include"))
+    args.append(os.path.join(DS_SYSROOT, "lib", "clang", "5.0.0", "include"))
     args.append("-isystem")
     args.append(os.path.join(DS_SYSROOT, "include"))
+    args.append("-fsanitize=safe-stack")
+    args.append("-mseparate-stack-seg")
+    args.append("-target")
+    args.append("x86_64-linux-musl")
     if linking:
         args.append("-fuse-ld={0}".format(ld))
     args.append(",".join(linker_args))
@@ -52,7 +56,8 @@ def get_ld_command(build_type, cxx=False, cmdLineArgs=None):
   DS_LIB_DIR=os.path.join(DS_SYSROOT, "lib")
   CC=os.path.join(DS_SYSROOT, "bin", "clang")
   CXX=os.path.join(DS_SYSROOT, "bin", "clang")
-  LD="ld"
+#  LD="ld"
+  LD=os.path.join(DS_SYSROOT, "bin", "ld.lld")
 
   if cmdLineArgs.count("-E"):
     cmdLineArgs.remove("-E")

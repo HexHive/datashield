@@ -47,6 +47,7 @@ static struct AsanDeactivatedFlags {
     FlagParser parser;
     RegisterActivationFlags(&parser, &f, &cf);
 
+    cf.SetDefaults();
     // Copy the current activation flags.
     allocator_options.CopyTo(&f, &cf);
     cf.malloc_context_size = malloc_context_size;
@@ -61,7 +62,7 @@ static struct AsanDeactivatedFlags {
       parser.ParseString(env);
     }
 
-    SetVerbosity(cf.verbosity);
+    InitializeCommonFlags(&cf);
 
     if (Verbosity()) ReportUnrecognizedFlags();
 
@@ -78,11 +79,13 @@ static struct AsanDeactivatedFlags {
     Report(
         "quarantine_size_mb %d, max_redzone %d, poison_heap %d, "
         "malloc_context_size %d, alloc_dealloc_mismatch %d, "
-        "allocator_may_return_null %d, coverage %d, coverage_dir %s\n",
+        "allocator_may_return_null %d, coverage %d, coverage_dir %s, "
+        "allocator_release_to_os_interval_ms %d\n",
         allocator_options.quarantine_size_mb, allocator_options.max_redzone,
         poison_heap, malloc_context_size,
         allocator_options.alloc_dealloc_mismatch,
-        allocator_options.may_return_null, coverage, coverage_dir);
+        allocator_options.may_return_null, coverage, coverage_dir,
+        allocator_options.release_to_os_interval_ms);
   }
 } asan_deactivated_flags;
 

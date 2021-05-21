@@ -15,6 +15,7 @@
 _g:                                     # @g
 Lfunc_begin0:
 	.cv_file	1 "\\usr\\local\\google\\home\\majnemer\\llvm\\src\\<stdin>"
+	.cv_func_id 0
 	.cv_loc	0 1 3 0 is_stmt 0       # <stdin>:3:0
 # BB#0:                                 # %entry
 	pushl	%ebp
@@ -81,7 +82,7 @@ Ltmp3:
 # CHECK:      LocalVariableAddrRange {
 # CHECK:        OffsetStart: .text+0x9
 # CHECK:        ISectStart: 0x0
-# CHECK:        Range: 15
+# CHECK:        Range: 0xF
 # CHECK:      }
 # CHECK:    }
 # CHECK:    BlockRelocations [

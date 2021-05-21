@@ -15,7 +15,6 @@
 #ifndef LLVM_TRANSFORMS_SCALAR_H
 #define LLVM_TRANSFORMS_SCALAR_H
 
-#include "llvm/ADT/StringRef.h"
 #include <functional>
 
 namespace llvm {
@@ -82,6 +81,16 @@ FunctionPass *createDeadStoreEliminationPass();
 //
 FunctionPass *createAggressiveDCEPass();
 
+
+//===----------------------------------------------------------------------===//
+//
+// GuardWidening - An optimization over the @llvm.experimental.guard intrinsic
+// that (optimistically) combines multiple guards into one to have fewer checks
+// at runtime.
+//
+FunctionPass *createGuardWideningPass();
+
+
 //===----------------------------------------------------------------------===//
 //
 // BitTrackingDCE - This pass uses a bit-tracking DCE algorithm in order to
@@ -94,17 +103,6 @@ FunctionPass *createBitTrackingDCEPass();
 // SROA - Replace aggregates or pieces of aggregates with scalar SSA values.
 //
 FunctionPass *createSROAPass();
-
-//===----------------------------------------------------------------------===//
-//
-// ScalarReplAggregates - Break up alloca's of aggregates into multiple allocas
-// if possible.
-//
-FunctionPass *createScalarReplAggregatesPass(signed Threshold = -1,
-                                             bool UseDomTree = true,
-                                             signed StructMemberThreshold = -1,
-                                             signed ArrayElementThreshold = -1,
-                                             signed ScalarLoadThreshold = -1);
 
 //===----------------------------------------------------------------------===//
 //
@@ -132,13 +130,20 @@ Pass *createIndVarSimplifyPass();
 // into:
 //    %Z = add int 2, %X
 //
-FunctionPass *createInstructionCombiningPass();
+FunctionPass *createInstructionCombiningPass(bool ExpensiveCombines = true);
 
 //===----------------------------------------------------------------------===//
 //
 // LICM - This pass is a loop invariant code motion and memory promotion pass.
 //
 Pass *createLICMPass();
+
+//===----------------------------------------------------------------------===//
+//
+// LoopSink - This pass sinks invariants from preheader to loop body where
+// frequency is lower than loop preheader.
+//
+Pass *createLoopSinkPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -171,8 +176,9 @@ Pass *createLoopInstSimplifyPass();
 // LoopUnroll - This pass is a simple loop unrolling pass.
 //
 Pass *createLoopUnrollPass(int Threshold = -1, int Count = -1,
-                           int AllowPartial = -1, int Runtime = -1);
-// Create an unrolling pass for full unrolling only.
+                           int AllowPartial = -1, int Runtime = -1,
+                           int UpperBound = -1);
+// Create an unrolling pass for full unrolling that uses exact trip count only.
 Pass *createSimpleLoopUnrollPass();
 
 //===----------------------------------------------------------------------===//
@@ -258,7 +264,10 @@ FunctionPass *createFlattenCFGPass();
 //
 // CFG Structurization - Remove irreducible control flow
 //
-Pass *createStructurizeCFGPass();
+///
+/// When \p SkipUniformRegions is true the structizer will not structurize
+/// regions that only contain uniform branches.
+Pass *createStructurizeCFGPass(bool SkipUniformRegions = false);
 
 //===----------------------------------------------------------------------===//
 //
@@ -321,7 +330,14 @@ extern char &LCSSAID;
 // EarlyCSE - This pass performs a simple and fast CSE pass over the dominator
 // tree.
 //
-FunctionPass *createEarlyCSEPass();
+FunctionPass *createEarlyCSEPass(bool UseMemorySSA = false);
+
+//===----------------------------------------------------------------------===//
+//
+// GVNHoist - This pass performs a simple and fast GVN pass over the dominator
+// tree to hoist common expressions from sibling branches.
+//
+FunctionPass *createGVNHoistPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -335,7 +351,7 @@ FunctionPass *createMergedLoadStoreMotionPass();
 // GVN - This pass performs global value numbering and redundant load
 // elimination cotemporaneously.
 //
-FunctionPass *createGVNPass(bool NoLoads = false);
+FunctionPass *createNewGVNPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -375,6 +391,12 @@ FunctionPass *createSinkingPass();
 // LowerAtomic - Lower atomic intrinsics to non-atomic form
 //
 Pass *createLowerAtomicPass();
+
+//===----------------------------------------------------------------------===//
+//
+// LowerGuardIntrinsic - Lower guard intrinsics to normal control flow.
+//
+Pass *createLowerGuardIntrinsicPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -428,6 +450,10 @@ createSeparateConstOffsetFromGEPPass(const TargetMachine *TM = nullptr,
 //
 FunctionPass *createSpeculativeExecutionPass();
 
+// Same as createSpeculativeExecutionPass, but does nothing unless
+// TargetTransformInfo::hasBranchDivergence() is true.
+FunctionPass *createSpeculativeExecutionIfHasBranchDivergencePass();
+
 //===----------------------------------------------------------------------===//
 //
 // LoadCombine - Combine loads into bigger loads.
@@ -457,6 +483,13 @@ FunctionPass *createPlaceSafepointsPass();
 // explicit relocations to include explicit relocations.
 //
 ModulePass *createRewriteStatepointsForGCPass();
+
+//===----------------------------------------------------------------------===//
+//
+// StripGCRelocates - Remove GC relocates that have been inserted by
+// RewriteStatepointsForGC. The resulting IR is incorrect, but this is useful
+// for manual inspection.
+FunctionPass *createStripGCRelocatesPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -495,6 +528,21 @@ Pass *createLoopSimplifyCFGPass();
 //
 FunctionPass *createLoopVersioningPass();
 
+//===----------------------------------------------------------------------===//
+//
+// LoopDataPrefetch - Perform data prefetching in loops.
+//
+FunctionPass *createLoopDataPrefetchPass();
+
+///===---------------------------------------------------------------------===//
+ModulePass *createNameAnonGlobalPass();
+
+//===----------------------------------------------------------------------===//
+//
+// LibCallsShrinkWrap - Shrink-wraps a call to function if the result is not
+// used.
+//
+FunctionPass *createLibCallsShrinkWrapPass();
 } // End llvm namespace
 
 #endif

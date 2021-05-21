@@ -1,4 +1,5 @@
-CC=~/research/datashield/bin/musl-clang-debug-mask.py
+CC=~/research/datashield/bin/musl-clang-debug-mpx.py
+#CC=~/research/datashield/bin/musl-clang-debug-mask.py
 #CC=~/research/datashield/bin/musl-clang-release-mask.py
 #CC=~/research/datashield/bin/musl-clang-debug-late-mpx.py
 

@@ -38,7 +38,7 @@ namespace {
       if (F.getName() == "main") {
         ValueToValueMapTy vmap;
         auto M = F.getParent();
-        auto newF = CloneFunction(&F, vmap, true);
+        auto newF = CloneFunction(&F, vmap);
         M->getFunctionList().push_back(newF);
         IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
         IRB.CreateCall(newF, {&F.getArgumentList().front(), &F.getArgumentList().back()});

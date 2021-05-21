@@ -141,6 +141,7 @@ static=yes
 wrapper=auto
 gcc_wrapper=no
 clang_wrapper=no
+SAFE_STACK=no
 
 for arg ; do
 case "$arg" in
@@ -333,7 +334,7 @@ esac
 # Try to get a conforming C99 freestanding environment
 #
 tryflag CFLAGS_C99FSE -std=c99
-tryflag CFLAGS_C99FSE -nostdinc
+#tryflag CFLAGS_C99FSE -nostdinc
 tryflag CFLAGS_C99FSE -ffreestanding \
 || tryflag CFLAGS_C99FSE -fno-builtin
 tryflag CFLAGS_C99FSE -fexcess-precision=standard \
@@ -596,8 +597,26 @@ printf "using compiler runtime libraries: %s\n" "$LIBCC"
 SUBARCH=
 t="$CFLAGS_C99FSE $CPPFLAGS $CFLAGS"
 
+fnmatch '-fsanitize=safe-stack*|*\ -fsanitize=safe-stack*' "$CFLAGS" && SAFE_STACK=yes
+
+if test "$ARCH" = "i386" ; then
+if fnmatch '-mseparate-stack-seg*|*\ -mseparate-stack-seg*' "$CFLAGS" ; then
+if test "$SAFE_STACK" = "yes" ; then
+SUBARCH=ss
+else
+fail "$0: the separate stack segment feature requires that SafeStack also be enabled"
+fi
+fi
+fi
+
 if test "$ARCH" = "x86_64" ; then
 trycppif __ILP32__ "$t" && ARCH=x32
+fi
+
+if test "$ARCH" = "x32" -a "$SAFE_STACK" = "yes" ; then
+# x32 would change the offset of the unsafe stack pointer in the thread control
+# block.
+fail "$0: error: SafeStack unsupported for x32"
 fi
 
 if test "$ARCH" = "arm" ; then
@@ -751,6 +770,7 @@ OPTIMIZE_GLOBS = $OPTIMIZE_GLOBS
 ALL_TOOLS = $tools
 TOOL_LIBS = $tool_libs
 ADD_CFI = $ADD_CFI
+SAFE_STACK = $SAFE_STACK
 EOF
 test "x$static" = xno && echo "STATIC_LIBS ="
 test "x$shared" = xno && echo "SHARED_LIBS ="
